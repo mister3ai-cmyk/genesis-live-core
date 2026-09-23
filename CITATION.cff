@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this architecture in research, please cite as below."
+title: "Genesis Live Core: Autonomous Scientific Hypothesis Verification Platform"
+authors:
+  - family-names: Babych
+    given-names: Maksym
+    affiliation: "Hyperion DeepTech Research Group / Synapse Core Infrastructure"
+    email: research@syn.ai
+version: 0.1.0
+date-released: 2026-09-24
+license: BSL-1.1
+repository-code: https://github.com/mister3ai-cmyk/genesis-live-core
+keywords:
+  - DeSci
+  - autonomous laboratory
+  - SiLA 2
+  - NGP 4.5
+  - photonic computing
+  - GCBI
+  - epigenetics
+  - TFLN
+  - Hamilton STARlet
+  - Waters UPLC
+  - Zenodo
+  - prior art
