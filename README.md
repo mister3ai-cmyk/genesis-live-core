@@ -6,7 +6,7 @@
 *September 2026*
 
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-yellow.svg)](LICENSE)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.PENDING.svg)](https://doi.org/10.5281/zenodo.PENDING)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22926047.svg)](https://doi.org/10.5281/zenodo.22926047)
 > 💼 **Commercial use requires a license** — contact [research@syn.ai](mailto:research@syn.ai)
 
 ---
@@ -146,7 +146,7 @@ This repository is the 8th anchor in the DeepTech Proofs series:
 | 06 | Non-Hermitian D(0) Energy Catalysis | [10.5281/zenodo.22819187](https://doi.org/10.5281/zenodo.22819187) |
 | 07 | Post-Quantum Swarm Intelligence | [10.5281/zenodo.22819532](https://doi.org/10.5281/zenodo.22819532) |
 | 08 | LNOI-WDM-DISPATCHER-v1.0 | [10.5281/zenodo.22884782](https://doi.org/10.5281/zenodo.22884782) |
-| **GL** | **Genesis Live Core (this repository)** | **Pending** |
+| **GL** | **Genesis Live Core (this repository)** | [10.5281/zenodo.22926047](https://doi.org/10.5281/zenodo.22926047) |
 
 ---
 
