@@ -196,7 +196,7 @@ def _synthetic_chromatogram(
         sigma  = rng.uniform(0.05, 0.15)
         gauss  = height * np.exp(-0.5 * ((t - rt) / sigma) ** 2)
         signal += gauss
-        area    = float(np.trapz(gauss, t))
+        area    = float(np.trapezoid(gauss, t))
         snr     = height / 0.002
         peaks.append(ChromatographicPeak(
             peak_id=i,
