@@ -117,7 +117,7 @@ def run_preemptive_containment_diagnostic_v2_1() -> Dict[str, Any]:
         "version": "v2.1.0-preemptive-containment-verified",
         "license": "BSL-1.1",
         "master_concept_doi": "10.5281/zenodo.22944521",
-        "version_doi": "10.5281/zenodo.22964910",
+        "version_doi": "10.5281/zenodo.22960548",
         "release_sha256": release_sha256,
         "integrity_method": "canonical_config_string",
         "kinematic_oracle_performance": {

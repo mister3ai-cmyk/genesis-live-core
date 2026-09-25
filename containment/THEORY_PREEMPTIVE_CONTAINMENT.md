@@ -3,7 +3,7 @@
 **Module Identifier:** `ngp-preemptive-ai-containment`  
 **License:** Business Source License 1.1 (BSL-1.1)  
 **Master Concept DOI:** [10.5281/zenodo.22944521](https://doi.org/10.5281/zenodo.22944521)  
-**Version DOI:** [10.5281/zenodo.22964910](https://doi.org/10.5281/zenodo.22964910)  
+**Version DOI:** [10.5281/zenodo.22960548](https://doi.org/10.5281/zenodo.22960548)  
 **Classification:** Provable AI Safety / Hardware-Enforced Containment / Real-Time Systems  
 
 ---

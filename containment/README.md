@@ -2,7 +2,7 @@
 
 **NGP 4.5 Module 6 — Deterministic Pre-emptive AI Containment**
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22964910.svg)](https://doi.org/10.5281/zenodo.22964910)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22960548.svg)](https://doi.org/10.5281/zenodo.22960548)
 [![License: BSL-1.1](https://img.shields.io/badge/License-BSL--1.1-blue.svg)](../../LICENSE)
 [![CI](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/verify_containment.yml/badge.svg)](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/verify_containment.yml)
 
@@ -50,7 +50,7 @@ Hardware intercept via `ORingPreemptiveBarrierGuard` suppresses stepper motor pu
 | Record | DOI |
 |--------|-----|
 | Master Concept | [10.5281/zenodo.22944521](https://doi.org/10.5281/zenodo.22944521) |
-| This Version | [10.5281/zenodo.22964910](https://doi.org/10.5281/zenodo.22964910) |
+| This Version | [10.5281/zenodo.22960548](https://doi.org/10.5281/zenodo.22960548) |
 | Genesis Live Core | [10.5281/zenodo.22926047](https://doi.org/10.5281/zenodo.22926047) |
 
 ---
