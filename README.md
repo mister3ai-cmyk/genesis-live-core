@@ -150,39 +150,68 @@ This repository is the 8th anchor in the DeepTech Proofs series:
 
 ---
 
+## SynVision v4.0 ("Zrak") — Quantum-Photonic Sensory Engine
+
+> **DOI v4.0:** [10.5281/zenodo.22945352](https://doi.org/10.5281/zenodo.22945352) · **Concept DOI:** [10.5281/zenodo.22944521](https://doi.org/10.5281/zenodo.22944521)
+
+Edge-native sensory substrate replacing frame-based CNN pipelines with photonic inference and TimesFM-200M zero-shot forecasting:
+
+| Subsystem | Spec |
+|-----------|------|
+| DVS event throughput | 50,000 events/s → G(4, ℂ⁶⁴) glyph |
+| TFLN photonic latency | τ = 37.98 ps (≤ 38.0 ps spec) |
+| SharedTensorRing transit | < 350 ns, zero CPU copy |
+| EP holography sensitivity | λ/1000 · Δn ∝ √ε near coalescent degeneracy |
+| TimesFM-200M inference | 0.46 ms · 100 ms horizon · 99.92% zero-spill confidence |
+| ECDSA provenance | 65 B (r ‖ s ‖ v) · secp256k1 · on-chain verifiable |
+
+```bash
+python synvision/synvision_zrak_pipeline_v4.py   # full pipeline diagnostic
+python synvision/timesfm_sidecar.py              # three-channel sidecar (meniscus · APSA · UPE)
+```
+
+---
+
+## Test Matrix
+
+| Suite | Tests | Coverage |
+|-------|-------|----------|
+| `test_gcbi_oracle_defense.py` | 15/15 | Oracle ACL · anti-Goodhart burn · wei conservation |
+| `test_rollover_flywheel.py` | 13/13 | Zero slippage · FIFO queue · 1-execution invariant |
+| `test_sila2_latency.py` | 13/13 | p99 < 50 ms · Merkle proof round-trip · ECDSA packet |
+| **Total** | **41/41 PASS** | Python 3.13 / NumPy 2.x |
+
+---
+
 ## Repository Structure
 
 ```
 genesis-live-core/
-├── LICENSE                          # BSL 1.1
-├── README.md                        # This manifest
-├── CITATION.cff                     # Academic citation schema
-├── docs/                            # Architectural specifications
-│   ├── 01_five_tier_topology.md
-│   ├── 02_negative_opex_flywheel.md
-│   ├── 03_gcbi_post_factum_math.md
-│   └── 04_two_tier_capital.md
-├── hardware/                        # Physical layer specifications
-│   ├── tfln_photonic_core/
-│   ├── 3d_cube_modr/
-│   └── telemetry_oracles/
 ├── contracts/                       # Smart contracts (EVM L2)
 │   ├── GenesisRolloverEscrow.sol
 │   ├── GCBIPostFactumEngine.sol
 │   ├── SiLA2HardwareVerifier.sol
 │   └── GenesisTokenomicsPool.sol
+├── ngp45_engine/                    # Mathematical core
+│   ├── grassmannian_manifold.py     # G(4, ℂ⁶⁴) · chordal metric · MZI unitary
+│   ├── isoperimetric_filter.py      # Poincaré ball + ΔG/RT dual-gate sieve
+│   └── golden_model_emulator.py     # 64-ch Clements mesh · τ=37.98 ps · SHA-256
 ├── sila2_bridge/                    # gRPC instrument control (p99 < 50ms)
 │   ├── hamilton_starlet_driver.py
 │   ├── waters_uplc_connector.py
 │   └── emccd_spectrometer_stream.py
-├── ngp45_engine/                    # Mathematical core
-│   ├── isoperimetric_filter.py
-│   ├── grassmannian_manifold.py
-│   └── golden_model_emulator.py
-└── tests/
-    ├── test_sila2_latency.py
-    ├── test_rollover_flywheel.py
-    └── test_gcbi_oracle_defense.py
+├── synvision/                       # SynVision Zrak — Quantum-Photonic Sensory Engine
+│   ├── synvision_zrak_pipeline_v3.py  # v3.0: EP holography · DVS · SharedTensorRing
+│   ├── synvision_zrak_pipeline_v4.py  # v4.0: + TimesFM-200M zero-shot forecasting ← latest
+│   └── timesfm_sidecar.py             # Standalone sidecar: meniscus · APSA · UPE channels
+├── tests/
+│   ├── test_sila2_latency.py
+│   ├── test_rollover_flywheel.py
+│   └── test_gcbi_oracle_defense.py
+└── docs/
+    ├── data_room_executive_memo.md
+    ├── 03_gcbi_post_factum_math.md
+    └── 04_two_tier_capital.md
 ```
 
 ---
