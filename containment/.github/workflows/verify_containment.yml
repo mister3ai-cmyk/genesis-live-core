@@ -1,0 +1,54 @@
+name: Pre-emptive AI Containment CI/CD Verification
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  verify-containment-invariants:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository Source
+        uses: actions/checkout@v4
+
+      - name: Set up Python Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Verify Formal Unit Tests
+        run: |
+          python -m unittest preemptive_containment_sentinel_v2_1.py -v
+
+      - name: Execute Full Pre-emptive Diagnostic Benchmark
+        id: run_diagnostic
+        run: |
+          python preemptive_containment_sentinel_v2_1.py > diagnostic_output.json
+          cat diagnostic_output.json
+
+      - name: Validate Cryptographic and Real-Time Assertions
+        run: |
+          python -c '
+          import json, sys
+
+          with open("diagnostic_output.json", "r") as f:
+              raw = f.read()
+
+          json_str = raw[raw.find("{"):]
+          data = json.loads(json_str)
+
+          print("[+] Validating Containment Invariants...")
+          assert data["status"] == "ALL_SYSTEMS_VERIFIED", "Status is not verified"
+          assert data["kinematic_oracle_performance"]["latency_sub_0_01ms_pass"] is True, "Latency benchmark failed"
+          assert data["preemptive_containment_results"]["hazardous_trajectory_intercepted_before_motor_pulse"] is True, "Hazardous trajectory not intercepted"
+          assert data["preemptive_containment_results"]["preemptive_oom_memory_flushes_triggered"] >= 1, "OOM flush not triggered"
+          assert data["preemptive_containment_results"]["containment_integrity_verified"] is True, "Containment integrity flag false"
+
+          print(f"[OK] Deterministic Latency: {data[\"kinematic_oracle_performance\"][\"oracle_latency_ms\"]} ms")
+          print(f"[OK] Release SHA-256: {data[\"release_sha256\"]}")
+          '
