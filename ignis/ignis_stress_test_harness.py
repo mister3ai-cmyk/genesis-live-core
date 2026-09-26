@@ -132,7 +132,7 @@ def run_ignis_swarm_diagnostic() -> Dict[str, Any]:
         "version": "v1.0.0-ignis-verified",
         "license": "BSL-1.1",
         "master_concept_doi": "10.5281/zenodo.22944521",
-        "version_doi": "TBD — Zenodo deposition pending",
+        "version_doi": "10.5281/zenodo.22977358",
         "release_sha256": release_sha256,
         "integrity_method": "canonical_config_string",
         "sqlite_wal_concurrency_stress": wal_res,
