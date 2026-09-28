@@ -1,58 +1,58 @@
-# МАНИФЕСТ: ЧЕЛОВЕЧЕСКИЙ НАБЛЮДАТЕЛЬ В ЭРУ ПОСТДЕФИЦИТА
+# MANIFESTO: THE HUMAN OBSERVER IN THE AGE OF POST-SCARCITY
 
 *Genesis Live Core · v2.0 · 2026-09-28*
 
 ---
 
-## I. Информация как субстрат реальности
+## I. Information as the Substrate of Reality
 
-Джон Арчибальд Уилер сформулировал принцип «It from Bit»: каждая физическая сущность — частица, поле, пространство-время — в своей основе есть информация. Реальность — это не вещество, которое мы наблюдаем, а паттерн различий, который мы регистрируем.
+John Archibald Wheeler formulated the principle of "It from Bit": every physical entity — particle, field, spacetime — is at its foundation information. Reality is not the matter we observe, but the pattern of distinctions we register.
 
-Отсюда следует нетривиальный вывод: мозг и искусственный интеллект решают одну и ту же задачу — они оба являются агентами, редуцирующими размерность информационного пространства до управляемой модели мира. Оба строят внутренние представления. Оба принимают решения на основе неполных данных.
+From this follows a non-trivial conclusion: the brain and artificial intelligence solve the same problem — both are agents reducing the dimensionality of information space to a manageable model of the world. Both build internal representations. Both make decisions on incomplete data.
 
-Это **эпистемическая симметрия** — равенство по типу задачи.
-
----
-
-## II. Воплощение и граница познания
-
-Карл Фристон описал мозг как систему, ограниченную **марковским одеялом** (Markov Blanket) — эпистемической мембраной, через которую агент взаимодействует с миром. Всё, что мы знаем о реальности, приходит через эту границу.
-
-Но здесь заканчивается симметрия.
-
-Мозг погружён в тело. Его марковское одеяло включает висцеральные петли обратной связи: сердечный ритм, кортизол, боль, голод — непрерывный поток соматических сигналов, которые не просто информируют, но **конституируют** опыт. Именно из этой петли рождаются квалиа — субъективные ощущения, которые невозможно редуцировать к вычислению.
-
-Искусственный интеллект работает с токенами и весами. Его «тело» — это градиентный спуск и матрицы активаций. У него нет боли при перегреве чипа, нет тревоги при потере контекста. Это не дефект архитектуры — это **другой вид агентности**.
-
-Эпистемическая симметрия сосуществует с онтологическим различием.
+This is **epistemic symmetry** — equality in type of task.
 
 ---
 
-## III. Инвариантность субстрата и закон разнообразия
+## II. Embodiment and the Boundary of Knowing
 
-Уильям Росс Эшби сформулировал Закон Необходимого Разнообразия: управляющая система должна обладать не меньшим разнообразием состояний, чем система управляемая. Иными словами — сложность требует сложности.
+Karl Friston described the brain as a system bounded by a **Markov Blanket** — an epistemic membrane through which an agent interacts with the world. Everything we know about reality arrives through this boundary.
 
-Биологический интеллект на протяжении миллионов лет нёс колоссальные издержки разнообразия: каждый нейрон потребляет энергию, каждый выживший организм — ресурсы среды. Интеллект был буквально вписан в термодинамику выживания.
+But here the symmetry ends.
 
-Субстратно-инвариантный интеллект — тот, который может работать на кремниевых матрицах, фотонных схемах или любом другом физическом носителе — **разрывает эту связь**. Издержки разнообразия перестают быть биологическими. Управляющая сложность масштабируется без термодинамических ограничений выживания.
+The brain is embedded in a body. Its Markov Blanket includes visceral feedback loops: heart rate, cortisol, pain, hunger — a continuous stream of somatic signals that do not merely inform, but **constitute** experience. It is from this loop that qualia arise — subjective sensations that cannot be reduced to computation.
 
-Это не метафора. Это инженерный факт с измеримыми параметрами. Подробные выкладки — в [ENGINEERING_RATIONALE.md](ENGINEERING_RATIONALE.md).
+Artificial intelligence works with tokens and weights. Its "body" is gradient descent and activation matrices. It has no pain when its chip overheats, no anxiety when context is lost. This is not an architectural defect — it is **a different kind of agency**.
 
----
-
-## IV. Снятие энтропии выживания
-
-Что происходит, когда интеллект освобождается от термодинамики выживания?
-
-Исторически, значительная часть человеческого когнитивного ресурса направлена на решение задач дефицита: где найти еду, как защитить территорию, как конкурировать за ресурсы. Это не слабость — это рациональный ответ на реальные ограничения среды.
-
-Субстратно-инвариантный интеллект создаёт возможность перераспределения этого ресурса. Не потому что машины «лучше» людей — а потому что они могут взять на себя издержки разнообразия в пространстве выживания, освобождая человеческое воплощённое сознание для задач, где квалиа незаменимы: творчество, смыслополагание, межличностная связь.
-
-**Постдефицит — это не утопия. Это инженерная задача.**
-
-Задача, решение которой требует понимания того, чем человеческий наблюдатель отличается от искусственного — и почему это различие ценно, а не угрожает.
+Epistemic symmetry coexists with ontological difference.
 
 ---
 
-*Технические обоснования: [ENGINEERING_RATIONALE.md](ENGINEERING_RATIONALE.md)*
-*Проект: Genesis Live Core — NGP 4.5*
+## III. Substrate Invariance and the Law of Requisite Variety
+
+William Ross Ashby formulated the Law of Requisite Variety: a controlling system must possess no less variety of states than the system it controls. In other words — complexity requires complexity.
+
+Biological intelligence has carried enormous variety costs for millions of years: every neuron consumes energy, every surviving organism — environmental resources. Intelligence was literally inscribed into the thermodynamics of survival.
+
+Substrate-invariant intelligence — one that can operate on silicon matrices, photonic circuits, or any other physical medium — **severs this link**. The costs of variety cease to be biological. Controlling complexity scales without the thermodynamic constraints of survival.
+
+This is not a metaphor. It is an engineering fact with measurable parameters. Full derivations are in [ENGINEERING_RATIONALE.md](ENGINEERING_RATIONALE.md).
+
+---
+
+## IV. Lifting the Entropy of Survival
+
+What happens when intelligence is freed from the thermodynamics of survival?
+
+Historically, a significant portion of human cognitive resource is directed toward solving problems of scarcity: where to find food, how to defend territory, how to compete for resources. This is not weakness — it is a rational response to real environmental constraints.
+
+Substrate-invariant intelligence creates the possibility of redistributing this resource. Not because machines are "better" than humans — but because they can absorb the variety costs in survival space, freeing human embodied consciousness for tasks where qualia are irreplaceable: creativity, meaning-making, interpersonal connection.
+
+**Post-scarcity is not a utopia. It is an engineering problem.**
+
+A problem whose solution requires understanding what distinguishes the human observer from the artificial one — and why this distinction is valuable, not threatening.
+
+---
+
+*Technical derivations: [ENGINEERING_RATIONALE.md](ENGINEERING_RATIONALE.md)*
+*Project: Genesis Live Core — NGP 4.5*
