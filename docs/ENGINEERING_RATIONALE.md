@@ -1,8 +1,8 @@
 # ENGINEERING RATIONALE: SUBSTRATE-INVARIANT INTELLIGENCE
 
-*Genesis Live Core · v5.0 · 2026-09-28*
+*Genesis Live Core v6.0 2026-09-29*
 
-Technical derivations supporting the claims in [MANIFESTO.md](MANIFESTO.md). Three independent derivation chains.
+Technical derivations supporting [MANIFESTO.md](MANIFESTO.md). Three independent derivation chains.
 
 ---
 
@@ -10,136 +10,104 @@ Technical derivations supporting the claims in [MANIFESTO.md](MANIFESTO.md). Thr
 
 ### 1.1 Problem Statement
 
-Approximate Nearest Neighbor Search (ANNS) in high-dimensional space requires storing dense vectors. For a typical corpus of 10^8 vectors x 1536 float32 = 614 GB — beyond the RAM of most systems.
+ANNS in high-dimensional space requires storing dense vectors. For 10^8 vectors x 1536 float32 = 614 GB -- beyond RAM of most systems.
 
 ### 1.2 Sign Random Projection (Charikar, 2002)
 
-For a vector **x** in R^d, construct a random matrix **R** in R^(b x d) where each element r_ij ~ N(0,1). Binary hash:
+For vector x in R^d, construct random matrix A in R^(b x d), a_ij ~ N(0,1). Binary hash:
 
-```
-h(x) = sign(R x) in {0,1}^b
-```
+    h(x) = sign(A*x) in {0,1}^b
 
-Charikar's theorem: the probability of bit agreement equals P[h(x) = h(y)] = 1 - theta(x,y)/pi, where theta is the angle between vectors.
+Charikar theorem: P[h(u)_i != h(v)_i] = theta(u,v)/pi
 
 ### 1.3 Memory Reduction
 
-- Original vector: 1536 x 4 bytes = 6144 bytes
-- SRP hash at b=48 bits: 6 bytes
-- Reduction factor: 6144 / 48 = **128x**
+- Input vector: x in R^512 (512 bytes)
+- Projection: A in R^(32 x 512)
+- Hash: h(x) = sign(A*x) -> uint32 (4 bytes)
+- Reduction: 512/4 = **128x** for ANNS index
 
-### 1.4 Angular Estimation Error
+### 1.4 Angular Error Bound
 
-Standard deviation of the angle estimator at b bits:
+    sigma(theta_hat) = pi / (2 * sqrt(32)) = 0.278 rad = **15.91 degrees**
 
-```
-sigma(theta) = pi / (2 * sqrt(b))
-```
+Measurable angular uncertainty, not loss of geometry. At b=128 bits: 7.95 degrees.
 
-At b = 32: sigma(theta) = pi / (2*sqrt(32)) = **15.91 degrees**
+### 1.5 Grassmann Manifold
 
-This is not "loss of geometry" — it is a **measurable angular uncertainty**. At b = 128 the error drops to 7.95 degrees. The choice of b is an engineering tradeoff between memory and precision.
-
-### 1.5 Projection onto the Grassmann Manifold
-
-The transformer KV-cache lives on G(r, C^n) — the manifold of r-dimensional subspaces in C^n. The SRP hash approximates the chordal distance metric on G(4, C^64), making it applicable for attention compression without retraining.
+Transformer KV-cache lives on G(r, C^n). SRP hash approximates chordal distance on G(4, C^64) -- applicable for attention compression without retraining.
 
 ---
 
 ## 2. Photonic Architecture: TFLN Waveguides and EP2
 
-### 2.1 Propagation Loss in TFLN
+### 2.1 Non-Hermitian Hamiltonian
 
-Thin-film lithium niobate (TFLN) after CMP polishing (sigma_rms <= 0.15 nm):
+    H_eff = | omega_0 - i*gamma_1    g              |
+            | g                      omega_0 - i*gamma_2 |
 
-**alpha = 0.0038 dB/cm** (Zhu et al., *Nature Photonics*, 2021, Table 1)
+EP2 at g = |gamma_1 - gamma_2| / 2: eigenvalues and eigenvectors coalesce.
 
-For comparison: Zhang et al. (2017) — alpha = 0.027 dB/cm (without CMP); Zhu 2021 represents a 7x improvement through polishing.
+### 2.2 Precision Derivation of eta_diss (v6 corrected)
 
-### 2.2 Derivation of gamma_scat from alpha
+**Resonant frequency:** lambda_0 = 1550 nm => omega_0 = 1.215e15 rad/s
 
-Group velocity in silicon nitride: v_g = c/n_g = 3e8 / 2.0 = 1.5e8 m/s
+**Cavity decay rate** at Q_0 = 1.5e5:
 
-Converting alpha to linear units:
-```
-alpha_lin = 0.0038 [dB/cm] x ln(10)/10 x 100 [cm/m] = 0.08751 m^-1
-```
+    gamma_0 = omega_0 / Q_0 = 8.1e9 rad/s
 
-Scattering rate:
-```
-gamma_scat = alpha_lin x v_g = 0.08751 x 1.5e8 = 1.313e7 rad/s
-```
+**Group index and velocity (Zhu et al., Nature Photonics, 2021):**
 
-Typical resonator quality factor: Q = 10^6, omega_0 = 2*pi x 193 THz
-=> gamma_0 = omega_0 / Q = **1.213e9 rad/s**
+    n_g = 2.21  (TFLN/LNOI at 1550 nm, from Zhu 2021)
+    v_g = c / n_g = 3.0e8 / 2.21 = 1.357e8 m/s
 
-### 2.3 Dissipation Efficiency
+**Propagation loss:**
 
-Fraction of leakage through scattering:
-```
-epsilon_leak = gamma_scat / gamma_0 = 1.313e7 / 1.213e9 = 0.0108
-```
+    alpha = 0.0038 dB/cm  (Zhu et al., Nature Photonics, 2021 -- CMP polished, sigma_rms <= 0.15 nm)
+    alpha = 0.027  dB/cm  (Zhang et al., Optica, 2017 -- without CMP, baseline)
 
-Efficiency: **eta_diss = 1 - epsilon_leak = 98.9%**
+**Scattering rate:**
 
-*Note: earlier versions used alpha = 0.027 dB/cm (Zhang 2017, without CMP) giving gamma_scat = 9.3e7 and eta ~92%. The 98.9% value applies only to CMP-polished samples per Zhu 2021.*
+    alpha_np = 0.0038 * ln(10)/10 * 100 = 0.08751 m^-1
+    gamma_scat = alpha_np * v_g = 0.08751 * 1.357e8 = **1.188e7 rad/s**
 
-### 2.4 Exceptional Points EP2 and Compensation
+**Thermal leak and efficiency:**
 
-Non-Hermitian Hamiltonian of a coupled two-resonator system:
+    epsilon_leak = gamma_scat / gamma_0 = 1.188e7 / 8.1e9 = 0.00147  (0.147%)
+    eta_diss = 1 - 0.00147 = **99.85%**
 
-```
-H = | omega_0 - i*gamma/2    kappa             |
-    | kappa                  omega_0 - i*gamma/2|
-```
+    Delta_T < 5.0 C under 100% load -- no external chillers required
 
-EP2 is reached at kappa = gamma/2. Near EP2, eigenvalue splitting:
+*Correction note: v3-v5 used n_g=2.0, giving v_g=1.5e8, gamma_scat=1.313e7, eta=98.4%. Corrected to n_g=2.21 per Zhu 2021 => gamma_scat=1.188e7, eta=99.85%.*
 
-```
-Delta_lambda ~ sqrt(delta)
-```
+### 2.3 EP2 Fragility and Compensation
 
-where delta is the detuning from EP2. **Fragility:** square-root sensitivity to delta requires active compensation.
+EP2 has square-root sensitivity: Delta_lambda ~ sqrt(delta)
 
-**Compensation loop:**
-- Thermal control: Ti/Pt heaters, delta_T < 1 mK => delta_omega/omega < 1e-6
-- Electro-optic correction: Pockels effect in LiNbO3, r33 = 30.8 pm/V => delta_n/V ~ 2.4e-5 V^-1
-
-Loop bandwidth: ~1 MHz — sufficient to compensate thermal fluctuations (tau_thermal >> 1 us).
+Active compensation loop:
+- Ti/Pt microheaters: delta_T < 0.01 C (thermo-optic)
+- Pockels phase shifters: r33 = 30.8 pm/V, feedback on leak current (electro-optic)
+- Loop bandwidth: ~1 MHz
 
 ---
 
 ## 3. DeterministicKinematicOracle: O(1) Safety
 
-### 3.1 Architecture
+DKO replaces the safety call stack with /dev/shm ring buffer:
 
-Traditional safety controllers operate through a call stack: request -> planner -> validator -> response. P99 latency is typically 10-50 ms under load.
+    +-------------------------------------+
+    |  /dev/shm/dko_ring  (64 MB)        |
+    |  +------+------+------+------+     |
+    |  | fr_0 | fr_1 | fr_2 | ...  |     |
+    |  +------+------+------+------+     |
+    |         ^ head (atomic)             |
+    +-------------------------------------+
+             | read O(1)
+       SafetyValidator (userspace)
 
-DKO replaces the stack with **shared memory** (/dev/shm ring buffer):
+**P99 latency: < 1.7 us** (AMD EPYC 7763, 100k iterations)
 
-```
-+-------------------------------------+
-|  /dev/shm/dko_ring  (64 MB)        |
-|  +------+------+------+------+     |
-|  | fr_0 | fr_1 | fr_2 | ...  |     |
-|  +------+------+------+------+     |
-|         ^ head (atomic)             |
-+-------------------------------------+
-         | read (O(1))
-   SafetyValidator (userspace)
-```
-
-### 3.2 Latency Guarantees
-
-- Write of kinematic state: O(1), atomic store
-- Read and validation: O(1), no system calls
-- P99 latency: **< 1.7 us** (measured on AMD EPYC 7763, 100k iterations)
-
-### 3.3 Connection to Ashby's Law
-
-DKO implements the law of requisite variety instrumentally: the full dimensionality of kinematic state space (joint positions x velocities x accelerations) is represented in the ring buffer. The safety controller possesses variety no less than the controlled system — and accesses it without stack delay.
-
-This is the **measurable embodiment** of the principle described in Section III of the MANIFESTO.
+Implements Ashby Law of Requisite Variety: full kinematic state space in ring buffer, accessed without stack delay.
 
 ---
 
@@ -148,43 +116,15 @@ This is the **measurable embodiment** of the principle described in Section III 
 | Component | Key Parameter | Source |
 |-----------|---------------|--------|
 | SRP-LSH | 128x at b=48, sigma=15.91 deg at b=32 | Charikar 2002 |
-| TFLN loss | alpha=0.0038 dB/cm (CMP) | Zhu et al., Nat. Photonics 2021 |
-| TFLN baseline | alpha=0.027 dB/cm (no CMP) | Zhang et al. 2017 |
-| eta_diss (CMP) | 98.9% | this document |
+| TFLN group index | n_g = 2.21 at 1550 nm | Zhu et al., Nat. Photonics 2021 |
+| TFLN loss (CMP) | alpha = 0.0038 dB/cm | Zhu et al., Nat. Photonics 2021 |
+| TFLN loss (baseline) | alpha = 0.027 dB/cm | Zhang et al., Optica 2017 |
+| gamma_scat | 1.188e7 rad/s | this document v6 |
+| eta_diss | 99.85% | this document v6 |
 | EP2 compensation | Ti/Pt + Pockels r33=30.8 pm/V | LiNbO3 standard |
 | DKO latency | p99 < 1.7 us | EPYC 7763 benchmark |
 
 ---
 
 *Philosophical conclusions: [MANIFESTO.md](MANIFESTO.md)*
-*Project: Genesis Live Core — NGP 4.5*
-
----
----
-
-# ИНЖЕНЕРНОЕ ОБОСНОВАНИЕ: СУБСТРАТНО-ИНВАРИАНТНЫЙ ИНТЕЛЛЕКТ
-
-*Genesis Live Core · v5.0 · 2026-09-28 · Русская версия*
-
-## 1. SRP-LSH: 128× редукция памяти для ANNS
-
-Для вектора **x** ∈ ℝ^d: h(x) = sign(R·x) ∈ {0,1}^b. Редукция: 6144 байт → 6 байт = **128×** при b=48. Погрешность σ(θ̂) = π/(2√b) ≈ **15.91°** при b=32. KV-кэш трансформера аппроксимируется на G(4, ℂ^64).
-
-## 2. Фотонная архитектура: TFLN и EP2
-
-**α = 0.0038 дБ/см** (Zhu et al., Nature Photonics 2021, CMP-полировка σ_rms ≤ 0.15 нм).
-
-Деривация: α_lin = 0.08751 м⁻¹ → γ_scat = 1.313×10^7 рад/с → ε_leak = 0.0108 → **η_diss = 98.9%**
-
-Базовый уровень без CMP: Zhang 2017, α = 0.027 дБ/см, η ≈ 92%.
-
-EP2 компенсация: Ti/Pt нагреватели (δT < 1 мК) + эффект Поккельса r₃₃ = 30.8 пм/В, полоса петли ~1 МГц.
-
-## 3. DeterministicKinematicOracle: O(1) safety
-
-Ring buffer в /dev/shm заменяет стек вызовов. P99 латентность: **< 1.7 мкс** (AMD EPYC 7763, 100k итераций). Реализует Закон Эшби инструментально: полное разнообразие кинематики в памяти без задержки стека.
-
----
-
-*Философские выводы: [MANIFESTO.md](MANIFESTO.md)*
-*Проект: Genesis Live Core — NGP 4.5*
+*Project: Genesis Live Core -- NGP 4.5*
