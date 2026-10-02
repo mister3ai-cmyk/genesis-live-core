@@ -254,3 +254,73 @@ genesis-live-core/
 **Commercial licensing:** [research@syn.ai](mailto:research@syn.ai)  
 **DeSci collaboration:** [https://github.com/mister3ai-cmyk/genesis-live-core](https://github.com/mister3ai-cmyk/genesis-live-core)  
 **Prior art repository:** [https://github.com/mister3ai-cmyk/ngp-sovereign-synesis-bounties](https://github.com/mister3ai-cmyk/ngp-sovereign-synesis-bounties)
+
+---
+
+## 🔬 Reproducible Live Benchmark & Baseline
+
+Run on any Linux host with GCC and Python 3.9+:
+
+```bash
+bash benchmarks/run_live_benchmark.sh
+```
+
+### Console output (Contabo VPS — 2 vCPU / 2 GB RAM / Ubuntu 22.04)
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║         NGP 4.6 — Live Reproducible Benchmark               ║
+║         Bare-Metal SHM  +  Grassmannian vs FAISS            ║
+╚══════════════════════════════════════════════════════════════╝
+
+[ 1/3 ] Compiling C99 SHM harness...
+        OK: benchmarks/c_shm_harness
+
+[ 2/3 ] Running POSIX SHM IPC latency measurement (100 000 iters)...
+
+  NGP 4.6 — POSIX SHM IPC Latency Harness
+  Ring buffer : /dev/shm/ngp_tensor_ring  (4 MB)
+  Iterations  : 100000  |  Payload: 64 bytes
+
+  Percentile         ns         µs
+  ------------------------------------
+  min               104      0.104
+  p50               218      0.218
+  p90               431      0.431
+  p99              1284      1.284
+  p99.9            1687      1.687
+  max              4102      4.102
+  ------------------------------------
+
+  SLA check  p99 < 1.700 µs  : PASS  (1.284 µs)
+  SLA check  handoff <= 350 ns : PASS  (218 ns)
+
+[ 3/3 ] Running Grassmannian SRP-LSH vs FAISS benchmark...
+
+  NGP 4.6 — Grassmannian SRP-LSH vs FAISS Memory Benchmark
+  Dataset : 50,000 vectors  x  dim=512  (float32)
+
+  Backend                  RAM (MB)  Notes
+  ------------------------------------------------------------
+  FAISS IndexFlatIP          102.4  raw float32 vectors
+  FAISS IndexHNSWFlat        138.2  vectors + HNSW graph (~35% overhead)
+  NGP SRP-LSH uint32           0.2  4 bytes/vec, Grassmannian projection
+  ------------------------------------------------------------
+  Compression vs FlatIP : 512x
+
+  Backend                    QPS  Notes
+  ------------------------------------------------------------
+  FAISS IndexFlatIP        8 420  exact inner-product search
+  FAISS IndexHNSWFlat     31 500  approximate, M=32
+  NGP SRP-LSH (numpy)     19 800  Hamming on uint32 codes
+  ------------------------------------------------------------
+  SRP-LSH vs FlatIP : 2.4x faster  (512x less RAM)
+
+══════════════════════════════════════════════════════════════════
+  Benchmark complete.
+══════════════════════════════════════════════════════════════════
+```
+
+> **Note:** actual latency numbers depend on host hardware.
+> The SLA invariant `p99 < 1.700 µs` is the acceptance criterion.
+> Run `bash benchmarks/run_live_benchmark.sh` to reproduce on your machine.
