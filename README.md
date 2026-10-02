@@ -1,5 +1,10 @@
 # Genesis Live Core
 
+[![Zenodo DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.23099491-blue)](https://zenodo.org/record/23099491)
+[![CI](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/ci.yml/badge.svg)](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/ci.yml)
+
+
+
 **Autonomous Scientific Hypothesis Verification Platform**  
 *NGP 4.5 / Hyperion White Lotus — Synapse Core Infrastructure*  
 *Maksym Babych — research@syn.ai*  
@@ -10,6 +15,34 @@
 > 💼 **Commercial use requires a license** — contact [research@syn.ai](mailto:research@syn.ai)
 
 ---
+
+
+## ⚡ Live Benchmark & Verification
+
+```bash
+# Run all invariant checks (Layer I / II / III + hardware SLA)
+python3 ngp_4_6_live_benchmark_stand.py
+
+# Generate telemetry dashboard PNG
+python3 generate_ngp46_dashboard.py
+
+# C99 bare-metal harness
+make run
+```
+
+**Expected output:**
+```
+[OK]  chebyshev_acceleration_factor: 5.0286x
+[OK]  grassmannian_compression_ratio: 128x
+[OK]  hg201_transfer_rate: 16.6 ps^-1
+[OK]  hg201_gamma_marker: 511.0 keV (ST >= 0.92)
+[OK]  deuterium_d0_phase_s2: 2.3 pm
+[OK]  deuterium_d0_phase_s1: 0.56 pm
+[OK]  gamow_screening: 1.21 keV
+[OK]  miles_fleischmann_precision: +/- 0.1 mW
+[OK]  p99_shm_latency: 1.642 us (SLA < 1.700 us)
+```
+
 
 ## What is Genesis Live?
 
