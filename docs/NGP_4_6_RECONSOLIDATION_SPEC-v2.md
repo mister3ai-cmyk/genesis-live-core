@@ -5,7 +5,7 @@
 > **Дата:** 30 сентября 2026 года
 > **Автор:** Synapse Core Infrastructure & NGP Working Group
 > **Репозиторий:** `https://github.com/mister3ai-cmyk/genesis-live-core`
-> **DOI:** `10.5281/zenodo.22999887`
+> **DOI:** `10.5281/zenodo.23099491`
 
 ---
 
