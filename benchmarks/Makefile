@@ -1,14 +1,19 @@
-CC      = gcc
-CFLAGS  = -O3 -march=native -std=c99 -Wall -Wextra -pedantic
-LDFLAGS = -lpthread -lrt
-TARGET  = c_shm_harness
+CC       = gcc
+CFLAGS   = -O3 -march=native -std=c99 -Wall -Wextra -pedantic
+LDFLAGS  = -lpthread -lrt
+SHFLAGS  = -shared -fPIC
 
-all: $(TARGET)
+TARGETS  = c_shm_harness fast_hamming.so
 
-$(TARGET): c_shm_harness.c
+all: $(TARGETS)
+
+c_shm_harness: c_shm_harness.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
+fast_hamming.so: fast_hamming.c
+	$(CC) $(CFLAGS) $(SHFLAGS) -o $@ $<
+
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
 
 .PHONY: all clean
