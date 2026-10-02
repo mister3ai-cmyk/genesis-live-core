@@ -265,7 +265,7 @@ Run on any Linux host with GCC and Python 3.9+:
 bash benchmarks/run_live_benchmark.sh
 ```
 
-### Console output (Contabo VPS — 2 vCPU / 2 GB RAM / Ubuntu 22.04)
+### Console output — Contabo VPS (6 vCPU / 11 GB RAM / Ubuntu 22.04, kernel 6.8.0)
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
@@ -282,18 +282,18 @@ bash benchmarks/run_live_benchmark.sh
   Ring buffer : /dev/shm/ngp_tensor_ring  (4 MB)
   Iterations  : 100000  |  Payload: 64 bytes
 
-  Percentile         ns         µs
+  Percentile           ns        us
   ------------------------------------
-  min               104      0.104
-  p50               218      0.218
-  p90               431      0.431
-  p99              1284      1.284
-  p99.9            1687      1.687
-  max              4102      4.102
+  min                  19      0.019
+  p50                  29      0.029
+  p90                  31      0.031
+  p99                  31      0.031
+  p99.9                40      0.040
+  max              157425    157.425
   ------------------------------------
 
-  SLA check  p99 < 1.700 µs  : PASS  (1.284 µs)
-  SLA check  handoff <= 350 ns : PASS  (218 ns)
+  SLA check  p99 < 1.700 us  : PASS  (0.031 us)
+  SLA check  handoff <= 350 ns : PASS  (29 ns)
 
 [ 3/3 ] Running Grassmannian SRP-LSH vs FAISS benchmark...
 
@@ -302,25 +302,25 @@ bash benchmarks/run_live_benchmark.sh
 
   Backend                  RAM (MB)  Notes
   ------------------------------------------------------------
-  FAISS IndexFlatIP          102.4  raw float32 vectors
-  FAISS IndexHNSWFlat        138.2  vectors + HNSW graph (~35% overhead)
-  NGP SRP-LSH uint32           0.2  4 bytes/vec, Grassmannian projection
+  FAISS IndexFlatIP           102.4  raw float32 vectors
+  FAISS IndexHNSWFlat         138.2  vectors + HNSW graph (~35% overhead)
+  NGP SRP-LSH uint32           0.20  4 bytes/vec, Grassmannian projection
   ------------------------------------------------------------
   Compression vs FlatIP : 512x
 
-  Backend                    QPS  Notes
+  Backend                       QPS  Notes
   ------------------------------------------------------------
-  FAISS IndexFlatIP        8 420  exact inner-product search
-  FAISS IndexHNSWFlat     31 500  approximate, M=32
-  NGP SRP-LSH (numpy)     19 800  Hamming on uint32 codes
+  FAISS IndexFlatIP             993  exact inner-product search
+  FAISS IndexHNSWFlat        11,120  approximate, M=32
+  NGP SRP-LSH (numpy)         2,012  Hamming on uint32 codes
   ------------------------------------------------------------
-  SRP-LSH vs FlatIP : 2.4x faster  (512x less RAM)
+  SRP-LSH vs FlatIP : 2.0x faster  (512x less RAM)
 
 ══════════════════════════════════════════════════════════════════
   Benchmark complete.
 ══════════════════════════════════════════════════════════════════
 ```
 
-> **Note:** actual latency numbers depend on host hardware.
-> The SLA invariant `p99 < 1.700 µs` is the acceptance criterion.
+> **Hardware:** Contabo VPS, 6 vCPU (x86_64), 11 GB RAM, Ubuntu 22.04, kernel 6.8.0-134-generic.
+> The SLA invariant `p99 < 1.700 µs` held at **0.031 µs** — 54x below the ceiling.
 > Run `bash benchmarks/run_live_benchmark.sh` to reproduce on your machine.
