@@ -285,15 +285,15 @@ bash benchmarks/run_live_benchmark.sh
   Percentile           ns        us
   ------------------------------------
   min                  19      0.019
-  p50                  29      0.029
+  p50                  30      0.030
   p90                  31      0.031
   p99                  31      0.031
-  p99.9                40      0.040
-  max              157425    157.425
+  p99.9                41      0.041
+  max               27791     27.791
   ------------------------------------
 
   SLA check  p99 < 1.700 us  : PASS  (0.031 us)
-  SLA check  handoff <= 350 ns : PASS  (29 ns)
+  SLA check  handoff <= 350 ns : PASS  (30 ns)
 
 [ 3/3 ] Running Grassmannian SRP-LSH vs FAISS benchmark...
 
@@ -308,13 +308,13 @@ bash benchmarks/run_live_benchmark.sh
   ------------------------------------------------------------
   Compression vs FlatIP : 512x
 
-  Backend                       QPS  Notes
-  ------------------------------------------------------------
-  FAISS IndexFlatIP             993  exact inner-product search
-  FAISS IndexHNSWFlat        11,120  approximate, M=32
-  NGP SRP-LSH (numpy)         2,012  Hamming on uint32 codes
-  ------------------------------------------------------------
-  SRP-LSH vs FlatIP : 2.0x faster  (512x less RAM)
+  Backend                           QPS  Notes
+  ----------------------------------------------------------------
+  FAISS IndexFlatIP               2,025  exact inner-product search
+  FAISS IndexHNSWFlat            14,489  approximate, M=32
+  NGP SRP-LSH C99 POPCNT         33,518  C99 __builtin_popcount / POPCNT
+  ----------------------------------------------------------------
+  SRP-LSH vs FlatIP : 16.5x faster  (512x less RAM)
 
 ══════════════════════════════════════════════════════════════════
   Benchmark complete.
@@ -322,5 +322,6 @@ bash benchmarks/run_live_benchmark.sh
 ```
 
 > **Hardware:** Contabo VPS, 6 vCPU (x86_64), 11 GB RAM, Ubuntu 22.04, kernel 6.8.0-134-generic.
-> The SLA invariant `p99 < 1.700 µs` held at **0.031 µs** — 54x below the ceiling.
+> Hamming kernel: C99 `__builtin_popcount` compiled `-O3 -march=native` → hardware `POPCNT` instruction.
+> SLA invariants held: `p99 = 0.031 µs` (54× below 1.700 µs ceiling), `handoff p50 = 30 ns`.
 > Run `bash benchmarks/run_live_benchmark.sh` to reproduce on your machine.
