@@ -85,14 +85,17 @@ Synapse Core Infrastructure structures commercial engagement through streamlined
 
 ### Commercial Framework
 
-| Engagement Tier | Scope & Operational Deliverables |
-|---|---|
-| **Proof-of-Concept (PoC) Audit** ($15,000 – $25,000) | • Rapid deployment of the 60-second zero-trust automated verification harness. • Bespoke enterprise workload profiling and performance benchmarking. • Zero-copy `/dev/shm` shared memory mapping and IPC configuration. • Comprehensive technical viability and infrastructure optimization report. |
-| **Enterprise Core Licensing** | • Full source-code access to the monolithic C99/AVX-512 engine. • Perpetual, sovereign enterprise deployment rights across private cloud or edge nodes. • Dedicated production C99/AVX-512 vectorization and hardware optimization. • Direct ongoing architectural support and core substrate updates. |
+| Engagement Tier | Investment | Scope & Operational Deliverables |
+|---|---|---|
+| **Enterprise Audit & PoC Pilot** | $50,000 – $100,000 | • 14-day turnkey integration against client data samples (vector embeddings, clearing logs, or order books). • Live benchmarking on client bare-metal infrastructure with guaranteed ≥ 90% OpEx reduction SLA. • Zero-copy `/dev/shm` IPC configuration and performance profiling report. • Delivered output: reproducible benchmark artefact + migration roadmap. |
+| **Proprietary Core Production License** | $250,000 – $1,000,000 / yr | • On-premise deployment of closed-source C99/AVX-512 binary core. • Perpetual sovereign deployment rights across private cloud, edge nodes, or HFT clearing clusters. • Dedicated architectural support, SLA guarantees, and quarterly substrate updates. |
+| **Custom Substrate & IP Integration** | $1,000,000 – $5,000,000+ | • Full-cycle adaptation of NGP core to client-specific silicon: TFLN photonics, ASIC tapeout, or sovereign compute monad. • Applicable to HFT market-making desks, national sovereign infrastructure funds, PropTech at UAE/GCC scale, and DePIN node operators requiring hardware-fused IP. |
 
 ### Strategic Impact
 
-The fixed-scope Proof-of-Concept (PoC) Audit delivers unmatched ROI velocity by compressing technical due diligence. In contrast to traditional multi-month DeepTech evaluation cycles costing upwards of $100,000, the $15,000–$25,000 PoC Audit allows enterprise clients to execute native profiling and zero-copy `/dev/shm` memory mapping on their own hardware within 60 seconds. This eliminates technical procurement risk prior to core source-code licensing, providing institutional buyers with absolute technological sovereignty over legacy cloud platforms.
+NGP 4.6 compresses infrastructure OpEx by $100,000–$500,000 per year per deployment cluster by eliminating high-RAM cloud instances and replacing bloated Python interpreter stacks with a 0.20 MB C99 bare-metal monad. The Enterprise Audit & PoC Pilot is sized at $50,000–$100,000 — a single budget line within the discretionary authority of a VP of Engineering or Head of Infrastructure, bypassing procurement committees entirely. This collapses a typical 6-month enterprise DeepTech evaluation cycle into a 14-day deterministic SLA proof executed on the client's own hardware.
+
+For institutional buyers at Oracle, CAE, HFT clearing desks, or sovereign development funds, the Production License ($250,000–$1,000,000/yr) delivers a hard ROI floor of 3–5× in year one against legacy cloud spend, with full technological sovereignty and zero vendor lock-in on managed cloud infrastructure.
 
 ---
 
