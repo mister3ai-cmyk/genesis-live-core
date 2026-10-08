@@ -12,13 +12,14 @@ jobs:
     strategy:
       matrix:
         cc: [ gcc, clang ]
+        cppflags: [ "", "-DSRP_BITS=256 -DK_CAND=512" ]
     steps:
       - uses: actions/checkout@v7
 
       - name: Build
         working-directory: benchmarks
-        run: make CC=${{ matrix.cc }}
+        run: make CC=${{ matrix.cc }} CPPFLAGS="${{ matrix.cppflags }}"
 
       - name: Run
         working-directory: benchmarks
-        run: ./run_benchmark
+        run: ./run_benchmark && ./run_benchmark --center

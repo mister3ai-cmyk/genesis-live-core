@@ -3,6 +3,11 @@
  * Genesis L0-Sidecar benchmark: SRP-LSH memory/QPS/recall + cross-process
  * POSIX SHM handoff latency. No external dependencies.
  *
+ * Usage:
+ *   ./run_benchmark                                   synthetic data
+ *   ./run_benchmark --data D.fvecs --queries Q.fvecs  [--out top10.ivecs]
+ * .fvecs/.ivecs: per vector, int32 dim followed by dim float32/int32 values.
+ *
  * Licensed under the Apache License, Version 2.0.
  */
 #define _GNU_SOURCE
@@ -23,11 +28,14 @@
 #include "../src/shm_ring.h"
 #include "../src/srp_lsh.h"
 
+/* synthetic dataset */
 #define N_VECS     50000
 #define DIM        512
 #define N_CLUSTERS 1000
 #define NOISE      1.0f
 #define N_QUERY    200
+
+
 #define K_TRUE     10
 #ifndef K_CAND
 #define K_CAND     128
@@ -175,57 +183,137 @@ static void cpu_model(char *buf, size_t n) {
     fclose(f);
 }
 
-int main(void) {
+/* Read a .fvecs file. Returns malloc'd [n * dim] floats or NULL. */
+static float *load_fvecs(const char *path, size_t *n_out, int *dim_out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); return NULL; }
+    int32_t dim;
+    if (fread(&dim, sizeof dim, 1, f) != 1 || dim <= 0) {
+        fprintf(stderr, "%s: bad header\n", path);
+        fclose(f);
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    long bytes = ftell(f);
+    size_t rec = sizeof(int32_t) + (size_t)dim * sizeof(float);
+    size_t n = (size_t)bytes / rec;
+    float *v = malloc(n * dim * sizeof(float));
+    fseek(f, 0, SEEK_SET);
+    for (size_t i = 0; v && i < n; i++) {
+        int32_t d;
+        if (fread(&d, sizeof d, 1, f) != 1 || d != dim ||
+            fread(v + i * dim, sizeof(float), dim, f) != (size_t)dim) {
+            fprintf(stderr, "%s: bad record %zu\n", path, i);
+            free(v);
+            v = NULL;
+        }
+    }
+    fclose(f);
+    *n_out = n;
+    *dim_out = dim;
+    return v;
+}
+
+int main(int argc, char **argv) {
     const char *rule = "============================================================";
     const char *thin = "------------------------------------------------------------";
+    const char *data_path = NULL, *query_path = NULL, *out_path = NULL;
+    int bad_args = 0, center = 0;
+    for (int i = 1; i < argc; i++) {
+        int has_val = i + 1 < argc;
+        if      (!strcmp(argv[i], "--center"))             center     = 1;
+        else if (!strcmp(argv[i], "--data") && has_val)    data_path  = argv[++i];
+        else if (!strcmp(argv[i], "--queries") && has_val) query_path = argv[++i];
+        else if (!strcmp(argv[i], "--out") && has_val)     out_path   = argv[++i];
+        else bad_args = 1;
+    }
+    if (bad_args || !data_path != !query_path) {
+        fprintf(stderr, "usage: %s [--center] [--data D.fvecs --queries Q.fvecs [--out top10.ivecs]]\n",
+                argv[0]);
+        return 2;
+    }
+
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     char cpu[128];
     cpu_model(cpu, sizeof cpu);
     calibrate_tsc();
 
-    float *centers = malloc((size_t)N_CLUSTERS * DIM * sizeof(float));
-    float *db      = malloc((size_t)N_VECS * DIM * sizeof(float));
-    float *qs      = malloc((size_t)N_QUERY * DIM * sizeof(float));
-    float *planes  = malloc((size_t)SRP_BITS * DIM * sizeof(float));
-    srp_code *codes    = malloc(N_VECS * sizeof(srp_code));
-    uint32_t *all_idx  = malloc(N_VECS * sizeof(uint32_t));
-    uint32_t *truth    = malloc((size_t)N_QUERY * K_TRUE * sizeof(uint32_t));
+    size_t n_vecs = N_VECS, n_query = N_QUERY;
+    int dim = DIM;
+    float *db, *qs;
+    if (data_path) {
+        int qdim = 0;
+        db = load_fvecs(data_path, &n_vecs, &dim);
+        qs = load_fvecs(query_path, &n_query, &qdim);
+        if (!db || !qs) return 1;
+        if (qdim != dim || dim % 16 != 0 || n_vecs < K_CAND || n_query == 0) {
+            fprintf(stderr, "need equal dims, dim %% 16 == 0, >= %d vectors, >= 1 query\n", K_CAND);
+            return 1;
+        }
+    } else {
+        float *centers = malloc((size_t)N_CLUSTERS * DIM * sizeof(float));
+        db = malloc((size_t)N_VECS * DIM * sizeof(float));
+        qs = malloc((size_t)N_QUERY * DIM * sizeof(float));
+        if (!centers || !db || !qs) { fputs("out of memory\n", stderr); return 1; }
+        for (size_t i = 0; i < (size_t)N_CLUSTERS * DIM; i++) centers[i] = randn();
+        for (size_t i = 0; i < N_VECS; i++)  gen_point(centers, db + i * DIM);
+        for (size_t i = 0; i < N_QUERY; i++) gen_point(centers, qs + i * DIM);
+        free(centers);
+    }
+
+    float *planes      = malloc((size_t)SRP_BITS * dim * sizeof(float));
+    srp_code *codes    = malloc(n_vecs * sizeof(srp_code));
+    uint32_t *all_idx  = malloc(n_vecs * sizeof(uint32_t));
+    uint32_t *truth    = malloc(n_query * K_TRUE * sizeof(uint32_t));
+    uint32_t *found    = calloc(n_query * K_TRUE, sizeof(uint32_t));
     uint32_t *cand     = malloc(K_CAND * sizeof(uint32_t));
-    uint64_t *qlat     = malloc((size_t)QPS_ROUNDS * N_QUERY * sizeof(uint64_t));
-    uint32_t top[K_TRUE];
-    if (!centers || !db || !qs || !planes || !codes || !all_idx || !truth || !cand || !qlat) {
+    uint64_t *qlat     = malloc(QPS_ROUNDS * n_query * sizeof(uint64_t));
+    if (!planes || !codes || !all_idx || !truth || !found || !cand || !qlat) {
         fputs("out of memory\n", stderr);
         return 1;
     }
 
-    for (size_t i = 0; i < (size_t)N_CLUSTERS * DIM; i++) centers[i] = randn();
-    for (size_t i = 0; i < N_VECS; i++)  gen_point(centers, db + i * DIM);
-    for (size_t i = 0; i < N_QUERY; i++) gen_point(centers, qs + i * DIM);
+    srp_make_planes(planes, dim, 7);
 
-    srp_make_planes(planes, DIM, 7);
-    for (size_t i = 0; i < N_VECS; i++) {
-        codes[i] = srp_encode(planes, DIM, db + i * DIM);
+    /* optional mean-centering: thresholds from the corpus mean */
+    float offsets[SRP_BITS], *offs = NULL;
+    if (center) {
+        double *acc = calloc(dim, sizeof(double));
+        float *mean = malloc(dim * sizeof(float));
+        if (!acc || !mean) { fputs("out of memory\n", stderr); return 1; }
+        for (size_t i = 0; i < n_vecs; i++)
+            for (int j = 0; j < dim; j++) acc[j] += db[i * dim + j];
+        for (int j = 0; j < dim; j++) mean[j] = (float)(acc[j] / n_vecs);
+        srp_make_offsets(planes, dim, mean, offsets);
+        offs = offsets;
+        free(acc);
+        free(mean);
+    }
+
+    for (size_t i = 0; i < n_vecs; i++) {
+        codes[i] = srp_encode(planes, dim, db + i * dim, offs);
         all_idx[i] = (uint32_t)i;
     }
 
     /* exact ground truth + baseline QPS: re-rank of the whole database */
     double t0 = now_s();
-    for (int q = 0; q < N_QUERY; q++)
-        srp_rerank_topk(db, DIM, qs + (size_t)q * DIM, all_idx, N_VECS, K_TRUE, truth + q * K_TRUE);
-    double exact_qps = N_QUERY / (now_s() - t0);
+    for (size_t q = 0; q < n_query; q++)
+        srp_rerank_topk(db, dim, qs + q * dim, all_idx, n_vecs, K_TRUE, truth + q * K_TRUE);
+    double exact_qps = n_query / (now_s() - t0);
 
     /* cascade: stage 1 = Hamming top-K_CAND, stage 2 = exact top-10.
      * Every query is timed end to end (encode + scan + re-rank). */
     size_t hit_cand = 0, hit_final = 0;
     t0 = now_s();
     for (int r = 0; r < QPS_ROUNDS; r++)
-        for (int q = 0; q < N_QUERY; q++) {
-            const float *qv = qs + (size_t)q * DIM;
+        for (size_t q = 0; q < n_query; q++) {
+            const float *qv = qs + q * dim;
+            uint32_t *top = found + q * K_TRUE;
             uint64_t c0 = ticks();
-            srp_code qc = srp_encode(planes, DIM, qv);
-            size_t m = srp_scan_topk(&qc, codes, N_VECS, K_CAND, cand);
-            size_t f = srp_rerank_topk(db, DIM, qv, cand, m, K_TRUE, top);
-            qlat[(size_t)r * N_QUERY + q] = ticks() - c0;
+            srp_code qc = srp_encode(planes, dim, qv, offs);
+            size_t m = srp_scan_topk(&qc, codes, n_vecs, K_CAND, cand);
+            size_t f = srp_rerank_topk(db, dim, qv, cand, m, K_TRUE, top);
+            qlat[r * n_query + q] = ticks() - c0;
             if (r > 0) continue;
             for (int t = 0; t < K_TRUE; t++) {
                 uint32_t want = truth[q * K_TRUE + t];
@@ -233,25 +321,40 @@ int main(void) {
                 for (size_t c = 0; c < f; c++) if (top[c] == want)  { hit_final++; break; }
             }
         }
-    double cascade_qps = (double)QPS_ROUNDS * N_QUERY / (now_s() - t0);
-    qsort(qlat, (size_t)QPS_ROUNDS * N_QUERY, sizeof(uint64_t), cmp_u64);
-    double q_p50 = ticks_to_ns(qlat[QPS_ROUNDS * N_QUERY / 2]) / 1000.0;
-    double q_p99 = ticks_to_ns(qlat[(size_t)(QPS_ROUNDS * N_QUERY * 0.99)]) / 1000.0;
+    double cascade_qps = (double)QPS_ROUNDS * n_query / (now_s() - t0);
+    qsort(qlat, QPS_ROUNDS * n_query, sizeof(uint64_t), cmp_u64);
+    double q_p50 = ticks_to_ns(qlat[QPS_ROUNDS * n_query / 2]) / 1000.0;
+    double q_p99 = ticks_to_ns(qlat[(size_t)(QPS_ROUNDS * n_query * 0.99)]) / 1000.0;
+
+    if (out_path) {
+        FILE *f = fopen(out_path, "wb");
+        if (!f) { perror(out_path); return 1; }
+        int32_t k = K_TRUE;
+        for (size_t q = 0; q < n_query; q++) {
+            fwrite(&k, sizeof k, 1, f);
+            fwrite(found + q * K_TRUE, sizeof(uint32_t), K_TRUE, f);
+        }
+        fclose(f);
+    }
 
     double p50 = 0, p99 = 0, p999 = 0;
     int ipc_ok = ncpu >= 2 ? run_ipc(&p50, &p99, &p999) : 1;
 
-    double raw_mb  = (double)N_VECS * DIM * sizeof(float) / 1e6;
-    double code_mb = (double)N_VECS * sizeof(srp_code) / 1e6;
+    double raw_mb  = (double)n_vecs * dim * sizeof(float) / 1e6;
+    double code_mb = (double)n_vecs * sizeof(srp_code) / 1e6;
 
     puts(rule);
     puts("GENESIS L0-SIDECAR BENCHMARK (C99 POSIX SHM)");
     puts(rule);
     printf("Host:                   %s (%ld CPUs)\n", cpu, ncpu);
-    printf("Dataset:                %d vectors (%d-dim, %d clusters, synthetic)\n",
-           N_VECS, DIM, N_CLUSTERS);
-    printf("Quantization:           SRP-LSH, %d random hyperplanes -> %d-bit code\n",
-           SRP_BITS, SRP_BITS);
+    if (data_path)
+        printf("Dataset:                %zu vectors, %zu queries (%d-dim, %s)\n",
+               n_vecs, n_query, dim, data_path);
+    else
+        printf("Dataset:                %d vectors (%d-dim, %d clusters, synthetic)\n",
+               N_VECS, DIM, N_CLUSTERS);
+    printf("Quantization:           SRP-LSH, %d random hyperplanes -> %d-bit code%s\n",
+           SRP_BITS, SRP_BITS, center ? ", mean-centered" : "");
     printf("Index Footprint:        %.2f MB (vs %.1f MB raw float32)\n", code_mb, raw_mb);
     printf("Compression Ratio:      %.0fx\n", raw_mb / code_mb);
     puts(thin);
@@ -270,12 +373,12 @@ int main(void) {
     printf("  Query latency p50:    %.1f us\n", q_p50);
     printf("  Query latency p99:    %.1f us\n", q_p99);
     printf("  Recall 10@10:         %.1f %%  (final top-10 vs exact top-10)\n",
-           100.0 * hit_final / (N_QUERY * K_TRUE));
+           100.0 * hit_final / (n_query * K_TRUE));
     printf("  Candidate recall:     %.1f %%  (exact top-10 within Hamming top-%d)\n",
-           100.0 * hit_cand / (N_QUERY * K_TRUE), K_CAND);
+           100.0 * hit_cand / (n_query * K_TRUE), K_CAND);
     printf("Exact f32 brute force:  %.0f QPS (single core, recall 100 %%)\n", exact_qps);
     puts(rule);
-    free(centers); free(db); free(qs); free(planes);
-    free(codes); free(all_idx); free(truth); free(cand); free(qlat);
+    free(db); free(qs); free(planes); free(codes); free(all_idx);
+    free(truth); free(found); free(cand); free(qlat);
     return 0;
 }

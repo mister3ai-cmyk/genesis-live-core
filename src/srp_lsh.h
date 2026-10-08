@@ -13,22 +13,38 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Code length; override at build time, e.g. make CPPFLAGS=-DSRP_BITS=256 */
+#ifndef SRP_BITS
 #define SRP_BITS       128
+#endif
+#if SRP_BITS <= 0 || SRP_BITS % 64 != 0
+#error "SRP_BITS must be a positive multiple of 64"
+#endif
+#define SRP_WORDS      (SRP_BITS / 64)
 #define SRP_RERANK_MAX 64   /* largest k accepted by srp_rerank_topk */
 
 typedef struct {
-    uint64_t w[2];
+    uint64_t w[SRP_WORDS];
 } srp_code;
 
 /* Fill planes[SRP_BITS * dim] with N(0,1) hyperplane normals (deterministic). */
 void srp_make_planes(float *planes, int dim, uint64_t seed);
 
-/* Encode one vector: bit b = sign(<planes_b, x>). */
-srp_code srp_encode(const float *planes, int dim, const float *x);
+/*
+ * Optional mean-centering against anisotropic embeddings:
+ * offsets[b] = <planes_b, mean>, so sign(<p, x - mean>) costs nothing extra.
+ */
+void srp_make_offsets(const float *planes, int dim, const float *mean, float *offsets);
+
+/* Encode one vector: bit b = sign(<planes_b, x> - offsets[b]).
+ * offsets may be NULL (no centering). */
+srp_code srp_encode(const float *planes, int dim, const float *x, const float *offsets);
 
 static inline int srp_hamming(const srp_code *a, const srp_code *b) {
-    return __builtin_popcountll(a->w[0] ^ b->w[0]) +
-           __builtin_popcountll(a->w[1] ^ b->w[1]);
+    int d = 0;
+    for (int i = 0; i < SRP_WORDS; i++)
+        d += __builtin_popcountll(a->w[i] ^ b->w[i]);
+    return d;
 }
 
 /*

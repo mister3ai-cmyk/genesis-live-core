@@ -1,4 +1,7 @@
 benchmarks/run_benchmark
+*.fvecs
+*.ivecs
+*.parquet
 *.o
 *.so
 __pycache__/

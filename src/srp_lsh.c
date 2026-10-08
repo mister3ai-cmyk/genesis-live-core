@@ -24,11 +24,17 @@ void srp_make_planes(float *planes, int dim, uint64_t seed) {
         planes[i] = gauss(&seed);
 }
 
-srp_code srp_encode(const float *planes, int dim, const float *x) {
-    srp_code code = {{0, 0}};
+void srp_make_offsets(const float *planes, int dim, const float *mean, float *offsets) {
+    for (int b = 0; b < SRP_BITS; b++)
+        offsets[b] = srp_dot(planes + (size_t)b * dim, mean, dim);
+}
+
+srp_code srp_encode(const float *planes, int dim, const float *x, const float *offsets) {
+    srp_code code = {{0}};
     for (int b = 0; b < SRP_BITS; b++) {
         float dot = srp_dot(planes + (size_t)b * dim, x, dim);
-        code.w[b >> 6] |= (uint64_t)(dot >= 0.0f) << (b & 63);
+        float thr = offsets ? offsets[b] : 0.0f;
+        code.w[b >> 6] |= (uint64_t)(dot >= thr) << (b & 63);
     }
     return code;
 }
