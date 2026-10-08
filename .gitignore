@@ -1,0 +1,6 @@
+benchmarks/run_benchmark
+*.o
+*.so
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -1,327 +1,133 @@
-# Genesis Live Core
+# Genesis Live Core: L0-Sidecar Vector Accelerator
 
-[![Zenodo DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.23099491-blue)](https://zenodo.org/record/23099491)
-[![CI](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/ci.yml/badge.svg)](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23059941.svg)](https://doi.org/10.5281/zenodo.23059941)
+[![Language: C99](https://img.shields.io/badge/Language-C99-00599C.svg)](https://en.wikipedia.org/wiki/C99)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Benchmark](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml/badge.svg)](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml)
 
-
-
-**Autonomous Scientific Hypothesis Verification Platform**  
-*NGP 4.5 / Hyperion White Lotus — Synapse Core Infrastructure*  
-*Maksym Babych — research@syn.ai*  
-*September 2026*
-
-[![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-yellow.svg)](LICENSE)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22926047.svg)](https://doi.org/10.5281/zenodo.22926047)
-> 💼 **Commercial use requires a license** — contact [research@syn.ai](mailto:research@syn.ai)
+A bare-metal, hardware-aware L0-sidecar co-processor for AI agent runtimes and vector databases.
+Bypasses the OS network stack and kernel interrupts via POSIX Shared Memory (`/dev/shm`), delivering sub-microsecond in-memory hot-context search.
 
 ---
 
+### ⚡ 10-Second Reproducible Benchmark
 
-## ⚡ Live Benchmark & Verification
+Run this single command on any modern Linux machine (GCC or Clang, 2+ CPUs, no other dependencies):
 
 ```bash
-# Run all invariant checks (Layer I / II / III + hardware SLA)
-python3 ngp_4_6_live_benchmark_stand.py
-
-# Generate telemetry dashboard PNG
-python3 generate_ngp46_dashboard.py
-
-# C99 bare-metal harness
-make run
+git clone https://github.com/mister3ai-cmyk/genesis-live-core.git && cd genesis-live-core/benchmarks && make && ./run_benchmark
 ```
 
-**Expected output:**
-```
-[OK]  chebyshev_acceleration_factor: 5.0286x
-[OK]  grassmannian_compression_ratio: 128x
-[OK]  hg201_transfer_rate: 16.6 ps^-1
-[OK]  hg201_gamma_marker: 511.0 keV (ST >= 0.92)
-[OK]  deuterium_d0_phase_s2: 2.3 pm
-[OK]  deuterium_d0_phase_s1: 0.56 pm
-[OK]  gamow_screening: 1.21 keV
-[OK]  miles_fleischmann_precision: +/- 0.1 mW
-[OK]  p99_shm_latency: 1.642 us (SLA < 1.700 us)
-```
+#### What you will see
 
-
-## What is Genesis Live?
-
-Genesis Live is a fully autonomous, end-to-end scientific verification pipeline that transforms hypothesis testing into a **globally verifiable, live-streamed scientific event with a proven Negative OpEx economic model**.
+Measured on a shared Contabo VPS (AMD EPYC, 6 vCPU, GCC 13.3), one of 7 runs:
 
 ```
-[ Global Input ] ──► [ NGP 4.5 Filter ] ──► [ Rollover Escrow ] ──► [ 3D Cube MODR ] ──► [ DeSci DOI ]
- (1000s of hypotheses)  (99% noise eliminated)  (Micro-staking)       (SiLA 2 Robots)      (Eternal hash)
+============================================================
+GENESIS L0-SIDECAR BENCHMARK (C99 POSIX SHM)
+============================================================
+Host:                   AMD EPYC Processor (with IBPB) (6 CPUs)
+Dataset:                50000 vectors (512-dim, 1000 clusters, synthetic)
+Quantization:           SRP-LSH, 32 random hyperplanes -> uint32
+Memory Footprint:       0.20 MB (vs 102.4 MB raw float32)
+Compression Ratio:      512x
+------------------------------------------------------------
+SHM Handoff, cross-process, one-way (rdtsc, 200000 iters):
+  p50:                  65 ns
+  p99:                  75 ns
+  p99.9:                150 ns
+Syscalls in hot loop:   0 (mmap'd mailbox, atomic load/store only)
+------------------------------------------------------------
+Throughput, SRP top-100: 18526 QPS (single core, POPCNT)
+Throughput, exact f32:  200 QPS (single core, brute-force scan)
+Recall 10@10:           2.4 %  (SRP top-10 vs exact top-10)
+Recall 10@100:          15.4 %  (exact top-10 within SRP top-100)
+============================================================
 ```
 
-The system eliminates human intermediaries between a theorist's idea and a physical experimental result — replacing them with photonic computation, Hamilton robotics, and global audience consensus.
+* **Cross-process handoff (one-way):** p50 **35–280 ns**, p99 **40–411 ns** across 7 runs. The spread depends on which physical cores the hypervisor gives the two vCPUs. Measured as `/dev/shm` ping-pong between two pinned processes, timed with `rdtsc`, round trip ÷ 2.
+* **RAM footprint:** **0.20 MB** for 50,000 × 512-dim vectors as 32-bit SRP-LSH codes (102.4 MB as raw float32).
+* **Throughput:** **10,000–18,500 QPS** per core for encode + Hamming top-100 scan using hardware `POPCNT`, against 166–200 QPS for an exact float32 brute-force scan of the same data in the same binary.
 
 ---
 
-## Core Architecture: Five-Tier Topology
+### 🏛️ Architecture: The Computational Endosymbiont
 
-### Tier 1 — Global Ingestion Layer
-Open gateway accepting hypotheses in machine-readable `TaskSpec` / `InstrumentCard` format. Any researcher, institution, or citizen scientist worldwide submits structured experimental proposals.
-
-### Tier 2 — NGP 4.5 In Silico Core (Isoperimetric Sieve)
-- **Knowledge Base:** 5,346 verified scientific sources (non-Hermitian quantum mechanics, SIRT6/NAD+ biophysics, SiLA 2 / ICH Q14 standards)
-- **Mathematics:** Poincaré Ball projection + 512D Grassmannian manifold G(4, ℂ⁶⁴)
-- **Function:** Automatic elimination of 99% pseudo-scientific noise and thermodynamically impossible reactions
-- **Output:** Shortlist of **10 rigorous, hardware-executable hypotheses** per cycle
-- **Photonic Acceleration:** TFLN/LNOI tensor co-processor (τ ≤ 38.0 ps, ≥ 18 × 10⁹ states/sec)
-
-### Tier 3 — Rollover Escrow Layer (Liquidity Game Theory)
-- Global micro-voting: $1–$5 via Apple Pay / USDC / L2
-- **Evergreen Queue:** The 9 hypotheses not selected for the current stream accumulate stake from fans and institutionals toward the next round — LTV of one hypothesis pool grows from $8.75M to **$40M–$60M gross**
-- **GCBI Multiplier:** Hypotheses with high Gross Civilization Benefit Index receive algorithmic stake amplification
-
-### Tier 4 — In Vitro Execution (3D Cube MODR Cleanroom)
-- Fully isolated ISO 5/7 cleanroom operating without humans under 4K camera arrays
-- **Equipment:** Hamilton Microlab STARlet + Waters ACQUITY UPLC / Tandem MS + ARETUSA laser module (337.1 nm)
-- **Control:** SiLA 2 gRPC stack, p99 < 50 ms latency, RT-error < 2%
-- Live viewers and validators see raw sensor data, pump pressures, and spectrographs in real time
-
-### Tier 5 — Crystallization Layer (DeSci Prior Art)
-- Convergence of physical chromatographic peaks with NGP 4.5 model verified in hardware
-- Instant committed DOI release to **Zenodo / OpenAIRE** — permanently anchoring global prior art
-
----
-
-## GCBI: Gross Civilization Benefit Index
-
-The GCBI replaces pure financial ROI as the system's governing objective function, solving Goodhart's Law through **post-factum hardware oracle enforcement**.
-
-$$\mathbf{GCBI} = \alpha \cdot \Delta\text{Healthspan} + \beta \cdot \Delta\text{Energy} + \gamma \cdot \text{OpenAccess} + \delta \cdot \text{HardwareFeasibility}$$
-
-| Component | Description |
-|-----------|-------------|
-| **ΔHealthspan** | Healthy life-years generated by the protocol (SIRT6 activation, LINE-1 suppression, DunedinPACE rollback) |
-| **ΔEnergy** | Clean energy output or thermal savings (D(0) physics, LENR, SWAC cooling) |
-| **OpenAccess** | Degree of knowledge decentralization (Zenodo DOI, no patent enclosure) |
-| **HardwareFeasibility** | Protocol readiness for execution in 3D Cube MODR (SiLA 2 compliance, p99 latency) |
-
-**Anti-Goodhart Mechanism:** GCBI is not scored by humans or NGP 4.5 predictions. It is **computed post-factum from cryptographically signed hardware telemetry** — chromatographic peaks from Waters ACQUITY and spectral signatures from Hamamatsu detectors, signed with ECDSA device keys. Plutocratic capital cannot purchase a spectrometric peak.
-
----
-
-## Unit Economics: Negative OpEx Model
-
-| Item | Value |
-|------|-------|
-| Incoming escrow pool (one stream) | ~3.5M participants × $2.50 = **$8,750,000 USD** |
-| Hard OpEx (reagents, columns, CDN, servers) | **~$93,000 USD** |
-| Coverage ratio | **> 90×** |
-| Liquidity split | 10% author grant / 20% DeSci Foundation / 70% platform margin |
-
-**Bootstrap path:** Pilot Stage ($250k B2B target bounties from DeSci syndicates / patient advocacy groups) → Public Expansion (3.5M retail scale via zero-CAC media partnerships).
-
----
-
-## Capital Structure: $7.5M Round
-
-### Contour 1 — Active Committed Allocation ($5,000,000)
-| Allocation | Amount |
-|------------|--------|
-| TFLN/LNOI Photonic Co-Processor (fabless MPW, EDA, fiber packaging) | $2.0M |
-| Hardware Lab (3D Cube MODR, Hamilton STARlet, Waters UPLC, ARETUSA laser) | $1.4M |
-| Team & Scientific Advisory Board (18 months) | $1.0M |
-| Legal, compliance, infrastructure runway | $0.6M |
-
-### Contour 2 — Milestone Contingency Escrow ($2,500,000)
-Protected buffer for hardware risk events (additional Tape-Out cycles, spectrometer replacement, logistics delays). Unconsumed funds auto-convert to reagent pre-financing for stream scaling.
-
----
-
-## Hardware Bridge: Zero Pipeline Blocker
-
-The TFLN photonic chip is the **target asset of the $7.5M round** — not a prerequisite for starting operations.
+Genesis does not replace your authoritative Vector Database. It acts as a symbiotic **L0 High-Frequency Co-Processor** sitting on the same host:
 
 ```
-Phase 0 (Now):     NGP 4.5 Golden Model runs on CPU/AVX-512 cluster
-                   → validates Grassmannian algebra
-                   → calibrates Hamilton robots and Waters UPLC
-                   → generates golden reference vectors
-
-Phase 1 (Fab):     TFLN wafer fabrication at foundry (LioniX / IMEC MPW shuttle)
-                   → parallel to Phase 0 operations
-                   → zero downtime, zero pipeline stall
-
-Phase 2 (Integration): TFLN chip arrives → verified against golden vectors (tolerance 10⁻⁶)
-                        → plugs in as photonic acceleration layer
-                        → 18B states/sec operational
-```
-
-*Golden Model validates linear algebra of MZI mesh — not optical physics. The photonic chip executes identical algebra at the speed of light without floating-point discretization.*
-
----
-
-## Regulatory Status
-
-| Dimension | Status |
-|-----------|--------|
-| Scope | In Vitro High-Throughput Screening (HTS) + fundamental analytical mapping |
-| FDA IND / IRB | **Not required** — subjects are solutions, protein crystals, and cell biomarkers (not human subjects) |
-| Laboratory standard | GLP (Good Laboratory Practice) + ISO 17025 |
-| Jurisdiction | DIFC / ADGM (UAE) or Switzerland — open data from automated screenings classified as pre-competitive scientific publication |
-
----
-
-## Prior Art Chain
-
-This repository is the 8th anchor in the DeepTech Proofs series:
-
-| # | Title | DOI |
-|---|-------|-----|
-| 01 | Biorock Electrochemical Accretion | [10.5281/zenodo.22798026](https://doi.org/10.5281/zenodo.22798026) |
-| 02 | SWAC & Venturi Microclimate | [10.5281/zenodo.22800377](https://doi.org/10.5281/zenodo.22800377) |
-| 03 | Reversible Photonic-Spin Computing | [10.5281/zenodo.22816555](https://doi.org/10.5281/zenodo.22816555) |
-| 04 | THz-Driven SIRT6 & Waddington | [10.5281/zenodo.22816994](https://doi.org/10.5281/zenodo.22816994) |
-| 05 | SiLA 2 Closed-Loop DryLab | [10.5281/zenodo.22818737](https://doi.org/10.5281/zenodo.22818737) |
-| 06 | Non-Hermitian D(0) Energy Catalysis | [10.5281/zenodo.22819187](https://doi.org/10.5281/zenodo.22819187) |
-| 07 | Post-Quantum Swarm Intelligence | [10.5281/zenodo.22819532](https://doi.org/10.5281/zenodo.22819532) |
-| 08 | LNOI-WDM-DISPATCHER-v1.0 | [10.5281/zenodo.22884782](https://doi.org/10.5281/zenodo.22884782) |
-| **GL** | **Genesis Live Core (this repository)** | [10.5281/zenodo.22926047](https://doi.org/10.5281/zenodo.22926047) |
-
----
-
-## SynVision v4.0 ("Zrak") — Quantum-Photonic Sensory Engine
-
-> **DOI v4.0:** [10.5281/zenodo.22945352](https://doi.org/10.5281/zenodo.22945352) · **Concept DOI:** [10.5281/zenodo.22944521](https://doi.org/10.5281/zenodo.22944521)
-
-Edge-native sensory substrate replacing frame-based CNN pipelines with photonic inference and TimesFM-200M zero-shot forecasting:
-
-| Subsystem | Spec |
-|-----------|------|
-| DVS event throughput | 50,000 events/s → G(4, ℂ⁶⁴) glyph |
-| TFLN photonic latency | τ = 37.98 ps (≤ 38.0 ps spec) |
-| SharedTensorRing transit | < 350 ns, zero CPU copy |
-| EP holography sensitivity | λ/1000 · Δn ∝ √ε near coalescent degeneracy |
-| TimesFM-200M inference | 0.46 ms · 100 ms horizon · 99.92% zero-spill confidence |
-| ECDSA provenance | 65 B (r ‖ s ‖ v) · secp256k1 · on-chain verifiable |
-
-```bash
-python synvision/synvision_zrak_pipeline_v4.py   # full pipeline diagnostic
-python synvision/timesfm_sidecar.py              # three-channel sidecar (meniscus · APSA · UPE)
+┌─────────────────────────────────────────────────────────────┐
+│                  AI Agent / LLM Runtime                     │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               │ (~35–280 ns zero-copy handoff via POSIX /dev/shm)
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│             C99 L0-Sidecar Co-Processor                     │
+│  • Hot-context codes fit in CPU L2 cache (0.20 MB)          │
+│  • Hardware POPCNT / SRP-LSH bitset evaluation              │
+│  • Candidate pruning before exact re-rank                   │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               │ (Async background spillover & sync)
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│      Authoritative Vector Database (L1 System of Record)    │
+│           [ Qdrant / Weaviate / Milvus / Pinecone ]         │
+│  • Multi-tenant metadata & rich hybrid filtering            │
+│  • Distributed sharding, Raft consensus & S3 cold storage   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Test Matrix
+### 📊 Benchmark Comparison
 
-| Suite | Tests | Coverage |
-|-------|-------|----------|
-| `test_gcbi_oracle_defense.py` | 15/15 | Oracle ACL · anti-Goodhart burn · wei conservation |
-| `test_rollover_flywheel.py` | 13/13 | Zero slippage · FIFO queue · 1-execution invariant |
-| `test_sila2_latency.py` | 13/13 | p99 < 50 ms · Merkle proof round-trip · ECDSA packet |
-| **Total** | **41/41 PASS** | Python 3.13 / NumPy 2.x |
+50,000 × 512-dim vectors, single core. Numbers come from `./run_benchmark` unless marked otherwise.
+
+| Metric | Exact float32 / network path | Genesis C99 L0-Sidecar (`/dev/shm`) |
+| --- | --- | --- |
+| **Hot working set RAM** | 102.4 MB (raw float32) | **0.20 MB** (512x smaller) |
+| **Handoff latency, one-way** | tens of µs for gRPC/HTTP loopback *(typical, not measured here)* | **35–280 ns p50**, 40–411 ns p99 |
+| **Throughput** | 166–200 QPS (exact brute-force scan) | **10,000–18,500 QPS** (SRP top-100) |
+| **Recall** | 100 % (exact) | **2.4 %** 10@10 · **15.4 %** 10@100 |
+| **Syscalls on query path** | full network stack | **0** in the hot loop |
+
+#### Known limitation: 32-bit codes trade recall for size
+
+With 32 bits, the Hamming distance between true neighbours (cosine ≈ 0.5) and unrelated vectors overlaps heavily at 50k scale. As a result, top-100 candidate pruning keeps only 15 % of the true top-10. For production use, the code length has to grow to 128–256 bits (still 64–128x smaller than float32), followed by an exact re-rank of the candidates. The benchmark reports recall so that this trade-off is visible, not hidden.
 
 ---
 
-## Repository Structure
+### 🔌 Host-Agnostic C-ABI
+
+The L0 engine is two small C99 headers: [`src/srp_lsh.h`](src/srp_lsh.h) for encoding and Hamming top-k, and [`src/shm_ring.h`](src/shm_ring.h) for the shared-memory mailbox. Host runtimes can map the same `/dev/shm` segment:
+
+* **Rust (Qdrant):** zero-copy mapping via `memmap2`.
+* **Go (Weaviate):** hot vectors live in POSIX SHM, outside the Go garbage-collected heap.
+* **C++ (Milvus):** direct linking against the C headers.
+* **Python (LangChain / AutoGen / CrewAI):** `mmap` bindings without serialization.
+
+Ready-made bindings are not part of this repository yet.
+
+---
+
+### 📁 Repository Layout
 
 ```
-genesis-live-core/
-├── contracts/                       # Smart contracts (EVM L2)
-│   ├── GenesisRolloverEscrow.sol
-│   ├── GCBIPostFactumEngine.sol
-│   ├── SiLA2HardwareVerifier.sol
-│   └── GenesisTokenomicsPool.sol
-├── ngp45_engine/                    # Mathematical core
-│   ├── grassmannian_manifold.py     # G(4, ℂ⁶⁴) · chordal metric · MZI unitary
-│   ├── isoperimetric_filter.py      # Poincaré ball + ΔG/RT dual-gate sieve
-│   └── golden_model_emulator.py     # 64-ch Clements mesh · τ=37.98 ps · SHA-256
-├── sila2_bridge/                    # gRPC instrument control (p99 < 50ms)
-│   ├── hamilton_starlet_driver.py
-│   ├── waters_uplc_connector.py
-│   └── emccd_spectrometer_stream.py
-├── synvision/                       # SynVision Zrak — Quantum-Photonic Sensory Engine
-│   ├── synvision_zrak_pipeline_v3.py  # v3.0: EP holography · DVS · SharedTensorRing
-│   ├── synvision_zrak_pipeline_v4.py  # v4.0: + TimesFM-200M zero-shot forecasting ← latest
-│   └── timesfm_sidecar.py             # Standalone sidecar: meniscus · APSA · UPE channels
-├── tests/
-│   ├── test_sila2_latency.py
-│   ├── test_rollover_flywheel.py
-│   └── test_gcbi_oracle_defense.py
-└── docs/
-    ├── data_room_executive_memo.md
-    ├── 03_gcbi_post_factum_math.md
-    └── 04_two_tier_capital.md
+src/          C99 core: SRP-LSH encoder + POPCNT scan, POSIX SHM mailbox   (Apache 2.0)
+benchmarks/   Makefile + run_benchmark.c (synthetic data generator inside)  (Apache 2.0)
+research/     Archived research modules, specs and earlier harnesses        (BSL 1.1, see research/LICENSE)
 ```
 
 ---
 
-## Contact
+### 🛡️ Open Core & Enterprise Engagement
 
-**Commercial licensing:** [research@syn.ai](mailto:research@syn.ai)  
-**DeSci collaboration:** [https://github.com/mister3ai-cmyk/genesis-live-core](https://github.com/mister3ai-cmyk/genesis-live-core)  
-**Prior art repository:** [https://github.com/mister3ai-cmyk/ngp-sovereign-synesis-bounties](https://github.com/mister3ai-cmyk/ngp-sovereign-synesis-bounties)
+* **Open-Source Core:** The `src/` and `benchmarks/` directories are open under Apache 2.0 for verification and benchmark reproducibility.
+* **Research Archive:** `research/` holds earlier research modules under the Business Source License 1.1. It is not needed to build or run the benchmark.
+* **Academic Reference & Prior Art:** Archived on Zenodo, DOI [`10.5281/zenodo.23059941`](https://doi.org/10.5281/zenodo.23059941).
+* **Enterprise Evaluation & PoC ($25k):** We offer a 2-week scoped evaluation against a shadow slice of your production query stream. It benchmarks latency, recall and DRAM footprint inside your security perimeter.
+* **Commercial Licensing:** Production binaries, automated node-locking, AVX-512/ARM NEON kernel tuning and SLA-backed clustering modules are available through annual enterprise licensing, with the full PoC fee credited.
 
----
-
-## 🔬 Reproducible Live Benchmark & Baseline
-
-Run on any Linux host with GCC and Python 3.9+:
-
-```bash
-bash benchmarks/run_live_benchmark.sh
-```
-
-### Console output — Contabo VPS (6 vCPU / 11 GB RAM / Ubuntu 22.04, kernel 6.8.0)
-
-```
-╔══════════════════════════════════════════════════════════════╗
-║         NGP 4.6 — Live Reproducible Benchmark               ║
-║         Bare-Metal SHM  +  Grassmannian vs FAISS            ║
-╚══════════════════════════════════════════════════════════════╝
-
-[ 1/3 ] Compiling C99 SHM harness...
-        OK: benchmarks/c_shm_harness
-
-[ 2/3 ] Running POSIX SHM IPC latency measurement (100 000 iters)...
-
-  NGP 4.6 — POSIX SHM IPC Latency Harness
-  Ring buffer : /dev/shm/ngp_tensor_ring  (4 MB)
-  Iterations  : 100000  |  Payload: 64 bytes
-
-  Percentile           ns        us
-  ------------------------------------
-  min                  19      0.019
-  p50                  30      0.030
-  p90                  31      0.031
-  p99                  31      0.031
-  p99.9                41      0.041
-  max               27791     27.791
-  ------------------------------------
-
-  SLA check  p99 < 1.700 us  : PASS  (0.031 us)
-  SLA check  handoff <= 350 ns : PASS  (30 ns)
-
-[ 3/3 ] Running Grassmannian SRP-LSH vs FAISS benchmark...
-
-  NGP 4.6 — Grassmannian SRP-LSH vs FAISS Memory Benchmark
-  Dataset : 50,000 vectors  x  dim=512  (float32)
-
-  Backend                  RAM (MB)  Notes
-  ------------------------------------------------------------
-  FAISS IndexFlatIP           102.4  raw float32 vectors
-  FAISS IndexHNSWFlat         138.2  vectors + HNSW graph (~35% overhead)
-  NGP SRP-LSH uint32           0.20  4 bytes/vec, Grassmannian projection
-  ------------------------------------------------------------
-  Compression vs FlatIP : 512x
-
-  Backend                           QPS  Notes
-  ----------------------------------------------------------------
-  FAISS IndexFlatIP               2,025  exact inner-product search
-  FAISS IndexHNSWFlat            14,489  approximate, M=32
-  NGP SRP-LSH C99 POPCNT         33,518  C99 __builtin_popcount / POPCNT
-  ----------------------------------------------------------------
-  SRP-LSH vs FlatIP : 16.5x faster  (512x less RAM)
-
-══════════════════════════════════════════════════════════════════
-  Benchmark complete.
-══════════════════════════════════════════════════════════════════
-```
-
-> **Hardware:** Contabo VPS, 6 vCPU (x86_64), 11 GB RAM, Ubuntu 22.04, kernel 6.8.0-134-generic.
-> Hamming kernel: C99 `__builtin_popcount` compiled `-O3 -march=native` → hardware `POPCNT` instruction.
-> SLA invariants held: `p99 = 0.031 µs` (54× below 1.700 µs ceiling), `handoff p50 = 30 ns`.
-> Run `bash benchmarks/run_live_benchmark.sh` to reproduce on your machine.
+For enterprise inquiries, open an issue or contact the architectural team via LinkedIn.

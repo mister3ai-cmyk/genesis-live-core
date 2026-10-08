@@ -1,25 +1,20 @@
 cff-version: 1.2.0
-message: "If you use this architecture in research, please cite as below."
-title: "Genesis Live Core: Autonomous Scientific Hypothesis Verification Platform"
+message: "If you use this software in research, please cite as below."
+title: "Genesis Live Core: L0-Sidecar Vector Accelerator"
 authors:
   - family-names: Babych
     given-names: Maksym
     affiliation: "Hyperion DeepTech Research Group / Synapse Core Infrastructure"
     email: research@syn.ai
-version: 0.1.0
-date-released: 2026-09-24
-license: BSL-1.1
+version: 0.2.0
+date-released: 2026-10-08
+doi: 10.5281/zenodo.23059941
+license: Apache-2.0
 repository-code: https://github.com/mister3ai-cmyk/genesis-live-core
 keywords:
-  - DeSci
-  - autonomous laboratory
-  - SiLA 2
-  - NGP 4.5
-  - photonic computing
-  - GCBI
-  - epigenetics
-  - TFLN
-  - Hamilton STARlet
-  - Waters UPLC
-  - Zenodo
-  - prior art
+  - vector search
+  - SRP-LSH
+  - POSIX shared memory
+  - C99
+  - POPCNT
+  - zero-copy IPC

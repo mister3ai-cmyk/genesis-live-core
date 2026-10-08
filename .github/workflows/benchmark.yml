@@ -1,0 +1,24 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cc: [ gcc, clang ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        working-directory: benchmarks
+        run: make CC=${{ matrix.cc }}
+
+      - name: Run
+        working-directory: benchmarks
+        run: ./run_benchmark
