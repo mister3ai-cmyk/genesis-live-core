@@ -6,7 +6,7 @@ authors:
     given-names: Maksym
     affiliation: "Hyperion DeepTech Research Group / Synapse Core Infrastructure"
     email: research@syn.ai
-version: 0.2.0
+version: 1.0.0
 date-released: 2026-10-08
 doi: 10.5281/zenodo.23059941
 license: Apache-2.0
