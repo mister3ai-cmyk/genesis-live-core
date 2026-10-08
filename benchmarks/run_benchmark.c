@@ -29,7 +29,9 @@
 #define NOISE      1.0f
 #define N_QUERY    200
 #define K_TRUE     10
-#define K_CAND     100
+#ifndef K_CAND
+#define K_CAND     128
+#endif
 #define QPS_ROUNDS 20
 #define IPC_WARMUP 20000
 #define IPC_ITERS  200000
@@ -67,11 +69,15 @@ static inline double ticks_to_ns(uint64_t t) { return (double)t; }
 
 static uint64_t rng_state = 42;
 
-static float randn(void) {
+static uint64_t rand_u64(void) {
     uint64_t z = (rng_state += 0x9E3779B97F4A7C15ULL);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-    z ^= z >> 31;
+    return z ^ (z >> 31);
+}
+
+static float randn(void) {
+    uint64_t z = rand_u64();
     /* Irwin-Hall(4) approximation: fast, mean 0, variance 1 */
     float s = 0.0f;
     for (int i = 0; i < 4; i++)
@@ -88,32 +94,9 @@ static void normalize(float *x) {
 
 /* Each vector = cluster center + NOISE * gaussian, unit-normalized. */
 static void gen_point(const float *centers, float *x) {
-    const float *c = centers + (size_t)(rng_state % N_CLUSTERS) * DIM;
+    const float *c = centers + (size_t)(rand_u64() % N_CLUSTERS) * DIM;
     for (int j = 0; j < DIM; j++) x[j] = c[j] + NOISE * randn();
     normalize(x);
-}
-
-/* ── exact baseline: float32 inner-product scan ───────────────────────── */
-
-static float dot(const float *a, const float *b) {
-    float acc[16] = {0};
-    for (int j = 0; j < DIM; j += 16)
-        for (int l = 0; l < 16; l++) acc[l] += a[j + l] * b[j + l];
-    float s = 0.0f;
-    for (int l = 0; l < 16; l++) s += acc[l];
-    return s;
-}
-
-static void exact_topk(const float *db, const float *q, uint32_t *out) {
-    float best[K_TRUE];
-    for (int i = 0; i < K_TRUE; i++) { best[i] = -2.0f; out[i] = 0; }
-    for (uint32_t i = 0; i < N_VECS; i++) {
-        float s = dot(db + (size_t)i * DIM, q);
-        if (s <= best[K_TRUE - 1]) continue;
-        int p = K_TRUE - 1;
-        while (p > 0 && best[p - 1] < s) { best[p] = best[p - 1]; out[p] = out[p - 1]; p--; }
-        best[p] = s; out[p] = i;
-    }
 }
 
 /* ── percentile helper ────────────────────────────────────────────────── */
@@ -204,11 +187,13 @@ int main(void) {
     float *db      = malloc((size_t)N_VECS * DIM * sizeof(float));
     float *qs      = malloc((size_t)N_QUERY * DIM * sizeof(float));
     float *planes  = malloc((size_t)SRP_BITS * DIM * sizeof(float));
-    uint32_t *codes  = malloc(N_VECS * sizeof(uint32_t));
-    uint32_t *qcodes = malloc(N_QUERY * sizeof(uint32_t));
-    uint32_t *truth  = malloc((size_t)N_QUERY * K_TRUE * sizeof(uint32_t));
-    uint32_t cand[K_CAND];
-    if (!centers || !db || !qs || !planes || !codes || !qcodes || !truth) {
+    srp_code *codes    = malloc(N_VECS * sizeof(srp_code));
+    uint32_t *all_idx  = malloc(N_VECS * sizeof(uint32_t));
+    uint32_t *truth    = malloc((size_t)N_QUERY * K_TRUE * sizeof(uint32_t));
+    uint32_t *cand     = malloc(K_CAND * sizeof(uint32_t));
+    uint64_t *qlat     = malloc((size_t)QPS_ROUNDS * N_QUERY * sizeof(uint64_t));
+    uint32_t top[K_TRUE];
+    if (!centers || !db || !qs || !planes || !codes || !all_idx || !truth || !cand || !qlat) {
         fputs("out of memory\n", stderr);
         return 1;
     }
@@ -218,43 +203,46 @@ int main(void) {
     for (size_t i = 0; i < N_QUERY; i++) gen_point(centers, qs + i * DIM);
 
     srp_make_planes(planes, DIM, 7);
-    for (size_t i = 0; i < N_VECS; i++) codes[i] = srp_encode(planes, DIM, db + i * DIM);
-
-    /* exact ground truth + baseline QPS */
-    double t0 = now_s();
-    for (int q = 0; q < N_QUERY; q++) exact_topk(db, qs + (size_t)q * DIM, truth + q * K_TRUE);
-    double exact_qps = N_QUERY / (now_s() - t0);
-
-    /* recall: exact top-10 found among SRP top-10 / top-100 candidates */
-    size_t hit10 = 0, hit100 = 0;
-    for (int q = 0; q < N_QUERY; q++) {
-        qcodes[q] = srp_encode(planes, DIM, qs + (size_t)q * DIM);
-        size_t m = srp_scan_topk(qcodes[q], codes, N_VECS, K_CAND, cand);
-        uint32_t c10[K_TRUE];
-        size_t m10 = srp_scan_topk(qcodes[q], codes, N_VECS, K_TRUE, c10);
-        for (int t = 0; t < K_TRUE; t++) {
-            uint32_t want = truth[q * K_TRUE + t];
-            for (size_t c = 0; c < m; c++)   if (cand[c] == want) { hit100++; break; }
-            for (size_t c = 0; c < m10; c++) if (c10[c] == want)  { hit10++;  break; }
-        }
+    for (size_t i = 0; i < N_VECS; i++) {
+        codes[i] = srp_encode(planes, DIM, db + i * DIM);
+        all_idx[i] = (uint32_t)i;
     }
 
-    /* SRP QPS: encode query + Hamming top-100 scan, single thread */
-    volatile uint32_t sink = 0;
+    /* exact ground truth + baseline QPS: re-rank of the whole database */
+    double t0 = now_s();
+    for (int q = 0; q < N_QUERY; q++)
+        srp_rerank_topk(db, DIM, qs + (size_t)q * DIM, all_idx, N_VECS, K_TRUE, truth + q * K_TRUE);
+    double exact_qps = N_QUERY / (now_s() - t0);
+
+    /* cascade: stage 1 = Hamming top-K_CAND, stage 2 = exact top-10.
+     * Every query is timed end to end (encode + scan + re-rank). */
+    size_t hit_cand = 0, hit_final = 0;
     t0 = now_s();
     for (int r = 0; r < QPS_ROUNDS; r++)
         for (int q = 0; q < N_QUERY; q++) {
-            uint32_t c = srp_encode(planes, DIM, qs + (size_t)q * DIM);
-            srp_scan_topk(c, codes, N_VECS, K_CAND, cand);
-            sink ^= cand[0];
+            const float *qv = qs + (size_t)q * DIM;
+            uint64_t c0 = ticks();
+            srp_code qc = srp_encode(planes, DIM, qv);
+            size_t m = srp_scan_topk(&qc, codes, N_VECS, K_CAND, cand);
+            size_t f = srp_rerank_topk(db, DIM, qv, cand, m, K_TRUE, top);
+            qlat[(size_t)r * N_QUERY + q] = ticks() - c0;
+            if (r > 0) continue;
+            for (int t = 0; t < K_TRUE; t++) {
+                uint32_t want = truth[q * K_TRUE + t];
+                for (size_t c = 0; c < m; c++) if (cand[c] == want) { hit_cand++;  break; }
+                for (size_t c = 0; c < f; c++) if (top[c] == want)  { hit_final++; break; }
+            }
         }
-    double srp_qps = (double)QPS_ROUNDS * N_QUERY / (now_s() - t0);
+    double cascade_qps = (double)QPS_ROUNDS * N_QUERY / (now_s() - t0);
+    qsort(qlat, (size_t)QPS_ROUNDS * N_QUERY, sizeof(uint64_t), cmp_u64);
+    double q_p50 = ticks_to_ns(qlat[QPS_ROUNDS * N_QUERY / 2]) / 1000.0;
+    double q_p99 = ticks_to_ns(qlat[(size_t)(QPS_ROUNDS * N_QUERY * 0.99)]) / 1000.0;
 
     double p50 = 0, p99 = 0, p999 = 0;
     int ipc_ok = ncpu >= 2 ? run_ipc(&p50, &p99, &p999) : 1;
 
     double raw_mb  = (double)N_VECS * DIM * sizeof(float) / 1e6;
-    double code_mb = (double)N_VECS * sizeof(uint32_t) / 1e6;
+    double code_mb = (double)N_VECS * sizeof(srp_code) / 1e6;
 
     puts(rule);
     puts("GENESIS L0-SIDECAR BENCHMARK (C99 POSIX SHM)");
@@ -262,8 +250,9 @@ int main(void) {
     printf("Host:                   %s (%ld CPUs)\n", cpu, ncpu);
     printf("Dataset:                %d vectors (%d-dim, %d clusters, synthetic)\n",
            N_VECS, DIM, N_CLUSTERS);
-    printf("Quantization:           SRP-LSH, %d random hyperplanes -> uint32\n", SRP_BITS);
-    printf("Memory Footprint:       %.2f MB (vs %.1f MB raw float32)\n", code_mb, raw_mb);
+    printf("Quantization:           SRP-LSH, %d random hyperplanes -> %d-bit code\n",
+           SRP_BITS, SRP_BITS);
+    printf("Index Footprint:        %.2f MB (vs %.1f MB raw float32)\n", code_mb, raw_mb);
     printf("Compression Ratio:      %.0fx\n", raw_mb / code_mb);
     puts(thin);
     if (ipc_ok == 0) {
@@ -276,15 +265,17 @@ int main(void) {
         puts("SHM Handoff:            skipped (needs >= 2 CPUs)");
     }
     puts(thin);
-    printf("Throughput, SRP top-%d: %.0f QPS (single core, POPCNT)\n", K_CAND, srp_qps);
-    printf("Throughput, exact f32:  %.0f QPS (single core, brute-force scan)\n", exact_qps);
-    printf("Recall 10@10:           %.1f %%  (SRP top-10 vs exact top-10)\n",
-           100.0 * hit10 / (N_QUERY * K_TRUE));
-    printf("Recall 10@%d:          %.1f %%  (exact top-10 within SRP top-%d)\n",
-           K_CAND, 100.0 * hit100 / (N_QUERY * K_TRUE), K_CAND);
+    printf("Two-stage cascade: Hamming top-%d -> exact re-rank -> top-%d\n", K_CAND, K_TRUE);
+    printf("  Throughput:           %.0f QPS (single core)\n", cascade_qps);
+    printf("  Query latency p50:    %.1f us\n", q_p50);
+    printf("  Query latency p99:    %.1f us\n", q_p99);
+    printf("  Recall 10@10:         %.1f %%  (final top-10 vs exact top-10)\n",
+           100.0 * hit_final / (N_QUERY * K_TRUE));
+    printf("  Candidate recall:     %.1f %%  (exact top-10 within Hamming top-%d)\n",
+           100.0 * hit_cand / (N_QUERY * K_TRUE), K_CAND);
+    printf("Exact f32 brute force:  %.0f QPS (single core, recall 100 %%)\n", exact_qps);
     puts(rule);
-    (void)sink;
     free(centers); free(db); free(qs); free(planes);
-    free(codes); free(qcodes); free(truth);
+    free(codes); free(all_idx); free(truth); free(cand); free(qlat);
     return 0;
 }
