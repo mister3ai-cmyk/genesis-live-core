@@ -1,6 +1,6 @@
 # Genesis Live Core: L0-Sidecar Vector Accelerator
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23059941.svg)](https://doi.org/10.5281/zenodo.23059941)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22926046.svg)](https://doi.org/10.5281/zenodo.22926046)
 [![Language: C99](https://img.shields.io/badge/Language-C99-00599C.svg)](https://en.wikipedia.org/wiki/C99)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Benchmark](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml/badge.svg)](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml)
@@ -171,7 +171,7 @@ research/     Archived research modules, specs and earlier harnesses        (BSL
 
 * **Open-Source Core:** The `src/` and `benchmarks/` directories are open under Apache 2.0 for verification and benchmark reproducibility.
 * **Research Archive:** `research/` holds earlier research modules under the Business Source License 1.1. It is not needed to build or run the benchmark.
-* **Academic Reference & Prior Art:** Archived on Zenodo, DOI [`10.5281/zenodo.23059941`](https://doi.org/10.5281/zenodo.23059941).
+* **Academic Reference & Prior Art:** Archived on Zenodo, concept DOI (always resolves to the latest version) [`10.5281/zenodo.22926046`](https://doi.org/10.5281/zenodo.22926046).
 * **Enterprise Evaluation & PoC ($25k):** We offer a 2-week scoped evaluation against a shadow slice of your production query stream. It benchmarks latency, recall and DRAM footprint inside your security perimeter.
 * **Commercial Licensing:** Production binaries, automated node-locking, AVX-512/ARM NEON kernel tuning and SLA-backed clustering modules are available through annual enterprise licensing, with the full PoC fee credited.
 
