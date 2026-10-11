@@ -153,7 +153,7 @@ The L0 engine is two small C99 headers: [`src/srp_lsh.h`](src/srp_lsh.h) for enc
 * **C++ (Milvus):** direct linking against the C headers.
 * **Python (LangChain / AutoGen / CrewAI):** `mmap` bindings without serialization.
 
-Ready-made bindings are not part of this repository yet.
+Ready-made bindings are not part of this repository yet. A minimal Python `ctypes` example (search + SQLite face read) lives in [`research/genesis-bridge/`](research/genesis-bridge/).
 
 ---
 
@@ -163,6 +163,7 @@ Ready-made bindings are not part of this repository yet.
 src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (Apache 2.0)
 benchmarks/   run_benchmark.c (synthetic or .fvecs input) + eval_real_embeddings.py   (Apache 2.0)
 research/     Archived research modules, specs and earlier harnesses        (BSL 1.1, see research/LICENSE)
+research/genesis-bridge/  ctypes bridge + SQLite face store demo         (BSL 1.1)
 ```
 
 ---
