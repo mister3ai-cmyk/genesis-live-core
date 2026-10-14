@@ -144,6 +144,29 @@ Build flags: `SRP_BITS` (multiple of 64, default 128) and `K_CAND` (default 128)
 
 ---
 
+### 🆚 In-Process Comparison: genesis-l0 vs ChromaDB
+
+The same 33,234 × 512-dim OpenAI vectors and 100 held-out queries, 10 passes, so 1,000 timed queries per engine. Each query returns the top-10 ids plus their payloads. ChromaDB 1.5.9 runs as a local `PersistentClient` with default settings (HNSW, inner product). genesis-l0 0.1.0 comes from PyPI with its defaults (256-bit codes, pool 512, mean-centered). Contabo VPS (AMD EPYC 2.0 GHz), 2026-10-14.
+
+| Engine | p50 | p90 | p99 | mean | Recall@10 | Ingest 33k |
+| --- | --- | --- | --- | --- | --- | --- |
+| ChromaDB (local) | 5.32 ms | 9.79 ms | 22.81 ms | 6.36 ms | **99.2 %** | 40.0 s |
+| genesis-l0 | **0.42 ms** | **0.53 ms** | **1.46 ms** | **0.46 ms** | 90.6 % | 1.6 s |
+
+Over three runs, p50 was 5.3–5.7 ms for ChromaDB and 0.38–0.44 ms for genesis-l0, a 12.8–14.6x speedup. genesis-l0 p99 varied from 0.69 to 1.71 ms on this shared VPS. The speed costs recall: 90.6 % vs 99.2 % Recall@10.
+
+**Reproduce** (after the data step above has written `/tmp/genesis_eval/`):
+
+```bash
+cd benchmarks
+pip install genesis-l0 chromadb matplotlib
+python3 bench_chroma.py --data /tmp/genesis_eval   # table + chroma_vs_genesis_latency.png
+```
+
+`genesis-l0` is installed from PyPI and is licensed separately (BSL 1.1); the script itself is Apache 2.0.
+
+---
+
 ### 🔌 Host-Agnostic C-ABI
 
 The L0 engine is two small C99 headers: [`src/srp_lsh.h`](src/srp_lsh.h) for encoding, Hamming top-k and exact re-rank, and [`src/shm_ring.h`](src/shm_ring.h) for the shared-memory mailbox. Host runtimes can map the same `/dev/shm` segment:
@@ -153,7 +176,7 @@ The L0 engine is two small C99 headers: [`src/srp_lsh.h`](src/srp_lsh.h) for enc
 * **C++ (Milvus):** direct linking against the C headers.
 * **Python (LangChain / AutoGen / CrewAI):** `mmap` bindings without serialization.
 
-Ready-made bindings are not part of this repository yet. A minimal Python `ctypes` example (search + SQLite face read) lives in [`research/genesis-bridge/`](research/genesis-bridge/).
+Ready-made bindings are not part of this repository yet. A minimal Python `ctypes` example (search + SQLite face read) lives in [`research/genesis-bridge/`](research/genesis-bridge/). A packaged Python version with SQLite storage and a LangGraph checkpointer is on PyPI: `pip install genesis-l0` ([pypi.org/project/genesis-l0](https://pypi.org/project/genesis-l0/), BSL 1.1).
 
 ---
 
@@ -161,7 +184,8 @@ Ready-made bindings are not part of this repository yet. A minimal Python `ctype
 
 ```
 src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (Apache 2.0)
-benchmarks/   run_benchmark.c (synthetic or .fvecs input) + eval_real_embeddings.py   (Apache 2.0)
+benchmarks/   run_benchmark.c (synthetic or .fvecs input) + eval_real_embeddings.py
+              + bench_chroma.py (genesis-l0 vs ChromaDB)                      (Apache 2.0)
 research/     Archived research modules, specs and earlier harnesses        (BSL 1.1, see research/LICENSE)
 research/genesis-bridge/  ctypes bridge + SQLite face store demo         (BSL 1.1)
 ```
