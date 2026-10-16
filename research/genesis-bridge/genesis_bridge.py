@@ -77,7 +77,7 @@ SEED_GLYPH = {
     "business": (
         "Genesis Live Core v1.0.0. Concept DOI 10.5281/zenodo.22926046; "
         "release v1.0.0 DOI 10.5281/zenodo.23246581. "
-        "License: Apache-2.0 (src/, benchmarks/), BSL-1.1 (research/)."
+        "License: BUSL-1.1 (src/, benchmarks/ from 2026-10-16; research/)."
     ),
 }
 FACES = ("code", "research", "business")

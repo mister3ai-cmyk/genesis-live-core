@@ -15,7 +15,7 @@ ones from this run.
 
 genesis-l0 is installed from PyPI and has its own license (BSL 1.1).
 
-Licensed under the Apache License, Version 2.0.
+Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see LICENSE.
 """
 import argparse
 import os

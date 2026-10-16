@@ -1,6 +1,6 @@
 /*
  * src/shm_ring.c
- * Licensed under the Apache License, Version 2.0.
+ * Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see LICENSE.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "shm_ring.h"

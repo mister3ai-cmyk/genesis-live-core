@@ -4,7 +4,7 @@
  * on the same host. After shm_ring_open(), reads and writes are plain
  * loads/stores into the mapping: no syscalls on the hot path.
  *
- * Licensed under the Apache License, Version 2.0.
+ * Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see LICENSE.
  */
 #ifndef GENESIS_SHM_RING_H
 #define GENESIS_SHM_RING_H

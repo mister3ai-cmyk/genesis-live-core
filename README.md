@@ -2,7 +2,7 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22926046.svg)](https://doi.org/10.5281/zenodo.22926046)
 [![Language: C99](https://img.shields.io/badge/Language-C99-00599C.svg)](https://en.wikipedia.org/wiki/C99)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-orange.svg)](LICENSE)
 [![Benchmark](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml/badge.svg)](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml)
 
 A bare-metal, hardware-aware L0-sidecar co-processor for AI agent runtimes and vector databases.
@@ -163,7 +163,7 @@ pip install genesis-l0 chromadb matplotlib
 python3 bench_chroma.py --data /tmp/genesis_eval   # table + chroma_vs_genesis_latency.png
 ```
 
-`genesis-l0` is installed from PyPI and is licensed separately (BSL 1.1); the script itself is Apache 2.0.
+`genesis-l0` is installed from PyPI and is licensed separately (BSL 1.1); the script itself is covered by this repository's BSL 1.1 license.
 
 ---
 
@@ -183,9 +183,9 @@ Ready-made bindings are not part of this repository yet. A minimal Python `ctype
 ### 📁 Repository Layout
 
 ```
-src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (Apache 2.0)
+src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (BSL 1.1)
 benchmarks/   run_benchmark.c (synthetic or .fvecs input) + eval_real_embeddings.py
-              + bench_chroma.py (genesis-l0 vs ChromaDB)                      (Apache 2.0)
+              + bench_chroma.py (genesis-l0 vs ChromaDB)                      (BSL 1.1)
 research/     Archived research modules, specs and earlier harnesses        (BSL 1.1, see research/LICENSE)
 research/genesis-bridge/  ctypes bridge + SQLite face store demo         (BSL 1.1)
 ```
@@ -194,7 +194,7 @@ research/genesis-bridge/  ctypes bridge + SQLite face store demo         (BSL 1.
 
 ### 🛡️ Open Core & Enterprise Engagement
 
-* **Open-Source Core:** The `src/` and `benchmarks/` directories are open under Apache 2.0 for verification and benchmark reproducibility.
+* **Source-Available Core:** `src/` and `benchmarks/` are licensed under the [Business Source License 1.1](LICENSE). You may copy, modify and redistribute the code and use it for testing, development, benchmarking, evaluation and non-commercial research. Any production use, including offering the engine's functionality to third parties, requires a commercial license from the Licensor. Each version converts to Apache 2.0 on its Change Date (2030-10-16 for versions published from 2026-10-16). Versions published before 2026-10-16, including the v1.0.0 release, were distributed under Apache 2.0 and remain available under those terms.
 * **Research Archive:** `research/` holds earlier research modules under the Business Source License 1.1. It is not needed to build or run the benchmark.
 * **Academic Reference & Prior Art:** Archived on Zenodo, concept DOI (always resolves to the latest version) [`10.5281/zenodo.22926046`](https://doi.org/10.5281/zenodo.22926046).
 * **Enterprise Evaluation & PoC ($25k):** We offer a 2-week scoped evaluation against a shadow slice of your production query stream. It benchmarks latency, recall and DRAM footprint inside your security perimeter.

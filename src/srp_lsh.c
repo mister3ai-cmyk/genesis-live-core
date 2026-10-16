@@ -1,6 +1,6 @@
 /*
  * src/srp_lsh.c
- * Licensed under the Apache License, Version 2.0.
+ * Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see LICENSE.
  */
 #include "srp_lsh.h"
 

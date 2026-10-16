@@ -8,7 +8,7 @@
  *   ./run_benchmark --data D.fvecs --queries Q.fvecs  [--out top10.ivecs]
  * .fvecs/.ivecs: per vector, int32 dim followed by dim float32/int32 values.
  *
- * Licensed under the Apache License, Version 2.0.
+ * Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see LICENSE.
  */
 #define _GNU_SOURCE
 #include <sched.h>
