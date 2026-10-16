@@ -5,15 +5,12 @@ Licensed Work:        The contents of the research/ directory of Genesis Live Co
                       (c) 2026 Maksym Babych / Synapse Core Infrastructure
                       (The rest of the repository is licensed
                       separately; see ../LICENSE.)
-Additional Use Grant: You may use the Licensed Work for non-commercial,
-                      research, educational, and personal purposes free of
-                      charge. Commercial use — including SaaS deployment,
-                      API monetization, embedding in commercial products,
-                      or providing managed services based on this work —
-                      requires a separate written commercial license from
-                      the Licensor. Contact: research@syn.ai
+Additional Use Grant: None
 Change Date:          2029-09-24
 Change License:       Apache License, Version 2.0
+
+For information about alternative licensing arrangements for the Licensed
+Work, please contact the Licensor: research@syn.ai
 
 License text copyright © 2017 MariaDB Corporation Ab, All Rights Reserved.
 "Business Source License" is a trademark of MariaDB Corporation Ab.
