@@ -5,7 +5,7 @@
  *      Hamming-distance candidate scan via hardware POPCNT.
  *   2. Exact inner-product re-rank of the candidates.
  *
- * Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see LICENSE.
+ * Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
  */
 #ifndef GENESIS_SRP_LSH_H
 #define GENESIS_SRP_LSH_H

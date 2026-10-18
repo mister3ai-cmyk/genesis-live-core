@@ -2,11 +2,25 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22926046.svg)](https://doi.org/10.5281/zenodo.22926046)
 [![Language: C99](https://img.shields.io/badge/Language-C99-00599C.svg)](https://en.wikipedia.org/wiki/C99)
-[![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-orange.svg)](LICENSE)
+[![License: Apache-2.0 (core) / BSL 1.1 (research)](https://img.shields.io/badge/License-Apache--2.0%20core%20%2F%20BSL%201.1%20research-blue.svg)](#%EF%B8%8F-licensing-split--open-core)
 [![Benchmark](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml/badge.svg)](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml)
 
 A bare-metal, hardware-aware L0-sidecar co-processor for AI agent runtimes and vector databases.
 Bypasses the OS network stack and kernel interrupts via POSIX Shared Memory (`/dev/shm`), delivering sub-microsecond in-memory hot-context search.
+
+---
+
+### 🇪🇺 Digital Sovereignty & NGI Zero Restack Alignment
+
+*Submitted to NLnet NGI Zero Restack (Proposal #2026-11-322). Not yet funded.*
+
+* **No remote dependency on the query path.** The engine is a C99 library running inside the host process: encode → hardware `POPCNT` Hamming scan → exact re-rank. No socket, RPC or external service is involved, and the hot loop issues 0 syscalls. When the caller lives in another process, the handoff is a POSIX shared-memory mailbox (`shm_open` + `mmap`, atomic load/store only), measured at 30–280 ns p50 one-way.
+* **Local, air-gapped operation.** The index is built from local `.fvecs` files. There is no telemetry, no licence server and no remote embedding endpoint. Building needs a C99 compiler, libc, `libm`, `librt` and pthreads. Network access is used only by the optional evaluation script that downloads a public dataset.
+* **Commodity hardware.** The stage-1 index for 50,000 × 512-dim vectors is 0.80 MB and the measurements above run on one core of a shared VPS, without a GPU or a managed database service.
+* **Data stays with its owner, in open formats.** The core is Apache-2.0, exposed as a plain C ABI, and reads and writes the standard `.fvecs` / `.ivecs` formats. Planned work (Milestone 2) stores the index in a single user-owned SQLite file with ACID transactions.
+* **Limits.** Search is approximate: Recall 10@10 is 88.0–99.3 % on synthetic data and up to 90.6 % on OpenAI embeddings (see below). This is a single-host engine, not a distributed database.
+
+Milestones, deliverables and acceptance criteria: [ROADMAP_NLNET.md](ROADMAP_NLNET.md).
 
 ---
 
@@ -78,9 +92,10 @@ Genesis does not replace your authoritative Vector Database. It acts as a symbio
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │      Authoritative Vector Database (L1 System of Record)    │
-│           [ Qdrant / Weaviate / Milvus / Pinecone ]         │
+│      [ local SQLite file (planned, Milestone 2) |           │
+│        optional self-hosted Qdrant / Weaviate / Milvus ]    │
 │  • Multi-tenant metadata & rich hybrid filtering            │
-│  • Distributed sharding, Raft consensus & S3 cold storage   │
+│  • Durable storage, optional sharding & Raft consensus      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -163,7 +178,7 @@ pip install genesis-l0 chromadb matplotlib
 python3 bench_chroma.py --data /tmp/genesis_eval   # table + chroma_vs_genesis_latency.png
 ```
 
-`genesis-l0` is installed from PyPI and is licensed separately (BSL 1.1); the script itself is covered by this repository's BSL 1.1 license.
+`genesis-l0` is installed from PyPI and is licensed separately (BSL 1.1); the script itself is covered by this repository's Apache-2.0 license.
 
 ---
 
@@ -183,21 +198,20 @@ Ready-made bindings are not part of this repository yet. A minimal Python `ctype
 ### 📁 Repository Layout
 
 ```
-src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (BSL 1.1)
+src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (Apache-2.0)
 benchmarks/   run_benchmark.c (synthetic or .fvecs input) + eval_real_embeddings.py
-              + bench_chroma.py (genesis-l0 vs ChromaDB)                      (BSL 1.1)
+              + bench_chroma.py (genesis-l0 vs ChromaDB)                      (Apache-2.0)
 research/     Archived research modules, specs and earlier harnesses        (BSL 1.1, see research/LICENSE)
 research/genesis-bridge/  ctypes bridge + SQLite face store demo         (BSL 1.1)
 ```
 
 ---
 
-### 🛡️ Open Core & Enterprise Engagement
+### 🛡️ Licensing (Split / Open Core)
 
-* **Source-Available Core:** `src/` and `benchmarks/` are licensed under the [Business Source License 1.1](LICENSE). You may copy, modify and redistribute the code and use it for testing, development, benchmarking, evaluation and non-commercial research. Any production use, including offering the engine's functionality to third parties, requires a commercial license from the Licensor. Each version converts to Apache 2.0 on its Change Date (2030-10-16 for versions published from 2026-10-16). Versions published before 2026-10-16, including the v1.0.0 release, were distributed under Apache 2.0 and remain available under those terms.
-* **Research Archive:** `research/` holds earlier research modules under the Business Source License 1.1. It is not needed to build or run the benchmark.
+* **Core, Apache-2.0:** `src/` and `benchmarks/` are licensed under the [Apache License 2.0](LICENSE), with no restrictions on production use, instruction set, core count or memory, and no node-locking. All work listed in [ROADMAP_NLNET.md](ROADMAP_NLNET.md), including the SIMD kernels, is released under Apache-2.0.
+* **Research, BSL 1.1:** `research/` holds research modules and earlier harnesses under the Business Source License 1.1 (see [research/LICENSE](research/LICENSE)). It is not needed to build or run the core or the benchmarks.
+* **Version history:** commits from 2026-10-16 to 2026-10-18 placed the core under BSL 1.1. The core is Apache-2.0 again from the commit that added this section. v1.0.0 and earlier versions were always Apache-2.0.
 * **Academic Reference & Prior Art:** Archived on Zenodo, concept DOI (always resolves to the latest version) [`10.5281/zenodo.22926046`](https://doi.org/10.5281/zenodo.22926046).
-* **Enterprise Evaluation & PoC ($25k):** We offer a 2-week scoped evaluation against a shadow slice of your production query stream. It benchmarks latency, recall and DRAM footprint inside your security perimeter.
-* **Commercial Licensing:** Production binaries, automated node-locking, AVX-512/ARM NEON kernel tuning and SLA-backed clustering modules are available through annual enterprise licensing, with the full PoC fee credited.
 
-For enterprise inquiries, open an issue or contact the architectural team via LinkedIn.
+Integration questions: open an issue or contact the author via LinkedIn.

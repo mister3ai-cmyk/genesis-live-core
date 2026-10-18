@@ -14,7 +14,7 @@ Requirements: pip install numpy pyarrow
 Usage:        python3 benchmarks/eval_real_embeddings.py [--center]
               (extra flags are passed through to run_benchmark)
 
-Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see LICENSE.
+Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
 """
 import os
 import re
