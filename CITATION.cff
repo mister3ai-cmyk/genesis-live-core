@@ -6,8 +6,8 @@ authors:
     given-names: Maksym
     affiliation: "Hyperion DeepTech Research Group / Synapse Core Infrastructure"
     email: research@syn.ai
-version: 1.0.0
-date-released: 2026-10-08
+version: 1.1.0
+date-released: 2026-10-18
 doi: 10.5281/zenodo.22926046
 license: Apache-2.0
 repository-code: https://github.com/mister3ai-cmyk/genesis-live-core
