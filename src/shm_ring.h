@@ -9,17 +9,21 @@
 #ifndef GENESIS_SHM_RING_H
 #define GENESIS_SHM_RING_H
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #define SHM_CACHELINE 64
 
 /* Producer and consumer counters live on separate cache lines
- * to avoid false sharing. */
+ * to avoid false sharing. They are C11 atomics: `volatile` alone would
+ * stop the compiler caching the value in a register but would not order
+ * the surrounding payload accesses, which is what the acquire/release
+ * pairing in the ping-pong loop relies on. */
 typedef struct {
-    volatile uint64_t req;
+    _Atomic uint64_t req;
     uint8_t _pad0[SHM_CACHELINE - sizeof(uint64_t)];
-    volatile uint64_t ack;
+    _Atomic uint64_t ack;
     uint8_t _pad1[SHM_CACHELINE - sizeof(uint64_t)];
     uint32_t payload[SHM_CACHELINE / sizeof(uint32_t)];
 } shm_mailbox;

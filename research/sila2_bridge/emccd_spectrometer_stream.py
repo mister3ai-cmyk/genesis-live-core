@@ -269,7 +269,7 @@ def _derive_address(private_key: bytes) -> str:
 
 
 def _sign(root: bytes, private_key: bytes, run_id: int) -> str:
-    """Stub signing — production: replace with secp256k1 ECDSA."""
+    """Stub signing: HMAC-SHA256, NOT a digital signature. Production: secp256k1 ECDSA."""
     import hmac
     message = root + run_id.to_bytes(4, "big")
     sig = hmac.new(private_key, message, hashlib.sha256).digest()

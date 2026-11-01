@@ -37,7 +37,7 @@ class HyperTetrapodGrassmannEngine:
         """
         Computes chordal distance on Grassmannian G(k, C^N):
         d_c(U, V) = sqrt( k - ||U^H V||_F^2 )
-        Simulates AVX-512 vector matrix multiplication in O(1) runtime.
+        Dense numpy matrix multiplication. No SIMD intrinsics are used.
         """
         M = np.dot(U.conj().T, V)
         frobenius_sq = np.sum(np.abs(M)**2)
@@ -198,7 +198,7 @@ def run_full_pipeline_diagnostic() -> dict:
         "hyper_tetrapod_grassmann_engine": {
             "manifold": "G(4, C^64)",
             "sample_chordal_distance": round(float(dist), 6),
-            "avx512_throughput_ops_per_sec": round(ops_per_sec, 2),
+            "matmul_throughput_ops_per_sec": round(ops_per_sec, 2),
             "raw_vector_size_bytes": quant_res["raw_size_bytes"],
             "compressed_size_bytes": quant_res["compressed_size_bytes"],
             "compression_ratio": f"{quant_res['compression_ratio']:.0f}x",

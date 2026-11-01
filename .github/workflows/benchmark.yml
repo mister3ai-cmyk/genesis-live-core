@@ -16,6 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Unit tests
+        working-directory: tests
+        run: make check CC=${{ matrix.cc }} CPPFLAGS="${{ matrix.cppflags }}"
+
       - name: Build
         working-directory: benchmarks
         run: make CC=${{ matrix.cc }} CPPFLAGS="${{ matrix.cppflags }}"

@@ -1,6 +1,11 @@
 CC      ?= gcc
 CFLAGS  ?= -O3 -march=native -std=c99 -Wall -Wextra -pthread
-LDLIBS   = -lrt -lm
+LDLIBS   = -lm
+# librt is a separate library on glibc only; on macOS and musl the
+# clock_gettime/shm_open symbols live in libc and -lrt fails to link.
+ifeq ($(shell uname -s),Linux)
+LDLIBS  += -lrt
+endif
 SRC      = ../src
 
 run_benchmark: run_benchmark.c $(SRC)/srp_lsh.c $(SRC)/shm_ring.c $(SRC)/srp_lsh.h $(SRC)/shm_ring.h
