@@ -4,10 +4,12 @@ Interface to Waters Empower 3 / OpenLab CDS chromatographic data system.
 
 Responsibilities:
   - Extract chromatographic peaks, retention times (t_R), and peak areas
-  - Sign telemetry package with instrument ECDSA private key (secp256k1)
+  - Sign telemetry package with an HMAC-SHA256 keyed digest (stub; ECDSA secp256k1 planned)
   - Output signed TelemetryPacket ready for SiLA2HardwareVerifier.sol
 
-ECDSA signing uses the cryptography library (production).
+NOTE: signing is an HMAC-SHA256 stub, NOT a digital signature. It provides integrity
+against accidental corruption, not non-repudiation. ECDSA secp256k1 via the cryptography
+library is planned but not implemented.
 In stub mode, signing is simulated with a deterministic test key.
 """
 from __future__ import annotations
@@ -75,7 +77,7 @@ class TelemetryPacket:
       device_address → address device  (Ethereum-compatible pubkey hash)
       run_id         → uint32 runId
       timestamp      → uint64 timestamp
-      signature      → (v, r, s) ECDSA tuple
+      signature      → HMAC-SHA256 digest (hex); not an (v, r, s) ECDSA tuple
     """
     chromatogram:   ChromatogramFrame
     merkle_root:    bytes          # 32 bytes
@@ -136,7 +138,7 @@ class WatersUPLCConnector:
     # ── Signing ───────────────────────────────────────────────────────────────
 
     def sign_and_package(self, frame: ChromatogramFrame) -> TelemetryPacket:
-        """Compute Merkle root over peaks and sign with instrument ECDSA key.
+        """Compute Merkle root over peaks and sign with an HMAC-SHA256 stub key.
 
         Returns a TelemetryPacket ready for SiLA2HardwareVerifier.submitTelemetry().
         """

@@ -126,7 +126,9 @@ static void pin_cpu(int cpu) {
 static int run_ipc(double *p50, double *p99, double *p999) {
     shm_mailbox *mb = shm_ring_open(SHM_NAME, sizeof(shm_mailbox));
     if (!mb) { perror("shm_ring_open"); return -1; }
-    memset((void *)mb, 0, sizeof(*mb));
+    atomic_init(&mb->req, 0);
+    atomic_init(&mb->ack, 0);
+    memset((void *)mb->payload, 0, sizeof(mb->payload));
 
     pid_t pid = fork();
     if (pid < 0) { perror("fork"); shm_ring_close(SHM_NAME, mb, sizeof(*mb)); return -1; }
@@ -135,10 +137,10 @@ static int run_ipc(double *p50, double *p99, double *p999) {
         uint64_t seen = 0;
         for (;;) {
             uint64_t r;
-            while ((r = __atomic_load_n(&mb->req, __ATOMIC_ACQUIRE)) == seen) {}
+            while ((r = atomic_load_explicit(&mb->req, memory_order_acquire)) == seen) {}
             if (r == UINT64_MAX) _exit(0);
             mb->payload[1] = mb->payload[0] ^ 0xA5A5A5A5u;  /* touch payload */
-            __atomic_store_n(&mb->ack, r, __ATOMIC_RELEASE);
+            atomic_store_explicit(&mb->ack, r, memory_order_release);
             seen = r;
         }
     }
@@ -150,12 +152,12 @@ static int run_ipc(double *p50, double *p99, double *p999) {
     for (uint64_t i = 1; i <= IPC_WARMUP + IPC_ITERS; i++) {
         uint64_t t0 = ticks();
         mb->payload[0] = (uint32_t)i;
-        __atomic_store_n(&mb->req, i, __ATOMIC_RELEASE);
-        while (__atomic_load_n(&mb->ack, __ATOMIC_ACQUIRE) != i) {}
+        atomic_store_explicit(&mb->req, i, memory_order_release);
+        while (atomic_load_explicit(&mb->ack, memory_order_acquire) != i) {}
         uint64_t t1 = ticks();
         if (i > IPC_WARMUP) lat[i - IPC_WARMUP - 1] = t1 - t0;
     }
-    __atomic_store_n(&mb->req, UINT64_MAX, __ATOMIC_RELEASE);
+    atomic_store_explicit(&mb->req, UINT64_MAX, memory_order_release);
     waitpid(pid, NULL, 0);
     shm_ring_close(SHM_NAME, mb, sizeof(*mb));
 
