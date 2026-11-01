@@ -5,8 +5,11 @@
 [![License: Apache-2.0 (core) / BSL 1.1 (research)](https://img.shields.io/badge/License-Apache--2.0%20core%20%2F%20BSL%201.1%20research-blue.svg)](#%EF%B8%8F-licensing-split--open-core)
 [![Benchmark](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml/badge.svg)](https://github.com/mister3ai-cmyk/genesis-live-core/actions/workflows/benchmark.yml)
 
-A bare-metal, hardware-aware L0-sidecar co-processor for AI agent runtimes and vector databases.
-Bypasses the OS network stack and kernel interrupts via POSIX Shared Memory (`/dev/shm`), delivering sub-microsecond in-memory hot-context search.
+An in-process L0 vector-search sidecar for AI agent runtimes and vector databases. The query path runs inside the host process and issues no syscalls; it touches neither the network stack nor a database server. When the caller lives in a separate process, the handoff is a POSIX shared-memory mailbox (`/dev/shm`).
+
+Two figures, kept apart because they are often conflated: the **cross-process handoff** is 30–290 ns p50, while an **end-to-end query** over 50,000 × 512-dim vectors is 122–152 µs p50. The engine is fast at the scale of a local index, not sub-microsecond at the scale of a search.
+
+Every number here was measured on a **virtualised shared host** and describes typical, not worst-case, behaviour. No real-time or determinism guarantee is claimed, and no such measurement has been performed — see [Measurement caveat](#-measurement-caveat).
 
 ---
 
@@ -66,7 +69,7 @@ Exact f32 brute force:  213 QPS (single core, recall 100 %)
 * **Recall 10@10: 88.0 %** at **6,300–6,900 QPS** per core, against 191–214 QPS for an exact float32 brute-force scan of the same data in the same binary (~33x faster).
 * **Query latency** (encode + scan + re-rank, end to end): p50 **139–147 µs**, p99 **204–455 µs**.
 * **Index footprint:** **0.80 MB** of 128-bit codes for 50,000 × 512-dim vectors (128x smaller than 102.4 MB raw float32), small enough to stay in L2/L3 cache.
-* **Cross-process handoff (one-way):** p50 **30–280 ns**, p99 **35–456 ns** across 5 runs. The spread depends on which physical cores the hypervisor gives the two vCPUs. Measured as `/dev/shm` ping-pong between two pinned processes, timed with `rdtsc`, round trip ÷ 2.
+* **Cross-process handoff (one-way):** p50 **30–290 ns**, p99 **35–456 ns**, p99.9 **40–6,715 ns** across 8 runs. The spread depends on which physical cores the hypervisor gives the two vCPUs. Measured as `/dev/shm` ping-pong between two pinned processes, timed with `rdtsc`, round trip ÷ 2.
 
 ---
 
@@ -195,15 +198,38 @@ Ready-made bindings are not part of this repository yet. A minimal Python `ctype
 
 ---
 
+### 🔬 Measurement caveat
+
+Every figure in this README was obtained on a **shared VPS under a KVM hypervisor** (AMD EPYC, 6 vCPU, gcc 13.3, Linux 6.8) with non-zero background load. They characterise typical behaviour, not worst-case.
+
+* **Recall is the stable one.** It was identical in every run.
+* **Query latency and throughput track host load.** A rise in load average from 0.6 to 1.0 costs roughly 18 % of throughput, which is why ranges are given rather than single numbers. The ratio against brute force is unaffected, because both degrade together.
+* **The cross-process handoff is bimodal between runs.** p50 clusters at either 30–60 ns or ~285 ns and p99.9 at either ~140 ns or ~6,000 ns — a 45x range at the tail. This tracks which physical cores the hypervisor assigns to the two processes, not the code path.
+* **The CPU exposes `avx`, `avx2` and `popcnt`; `avx512*` is absent.** The re-rank kernel uses sixteen independent accumulators so the compiler can auto-vectorise without `-ffast-math`. There are no hand-written SIMD intrinsics anywhere in the sources.
+
+Establishing hard real-time bounds would require a bare-metal host with isolated cores, `nohz_full`, disabled C-states and a PREEMPT_RT kernel, measuring worst-case rather than percentile latency. **No such measurement has been performed, and no real-time or determinism guarantee is claimed.** If you need worst-case numbers for an embedded or safety context, treat this engine as unproven until they exist.
+
+---
+
 ### 📁 Repository Layout
 
 ```
 src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (Apache-2.0)
 benchmarks/   run_benchmark.c (synthetic or .fvecs input) + eval_real_embeddings.py
               + bench_chroma.py (genesis-l0 vs ChromaDB)                      (Apache-2.0)
+tests/        Unit tests for the C core: 33 checks over srp_dot, srp_encode,
+              srp_make_planes/offsets, srp_scan_topk, srp_rerank_topk, plus
+              Charikar's theta/pi property.  `cd tests && make check`   (Apache-2.0)
 research/     Archived research modules, specs and earlier harnesses        (BSL 1.1, see research/LICENSE)
 research/genesis-bridge/  ctypes bridge + SQLite face store demo         (BSL 1.1)
 ```
+
+**What `research/` is, and is not.** It holds mathematical models, simulations and
+design notes — Python prototypes exploring ideas that are not part of the shipped
+engine. Those modules import nothing beyond `numpy` and the standard library: there
+are no device drivers, no fieldbus or robotics interfaces, and no hardware in the
+loop. Nothing in `research/` is required to build or run the core or the benchmarks,
+and none of it should be read as a validated or deployable component.
 
 ---
 
