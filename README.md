@@ -243,6 +243,31 @@ Three things follow, and the third is the one that matters most:
    repository.** The 0.3 ms figure belongs to a working set of tens of thousands of
    vectors and does not extrapolate.
 
+**Sizing the L0 tier: by scan time, not by RAM.** Svyatoslav Pavlov made the
+follow-up point that settles this: the 1 GiB index above never left RAM and still
+missed the 0.3 ms budget by two orders of magnitude, so the scan crosses the line
+long before the corpus outgrows the host. Cutting L0 by memory headroom therefore
+produces an "L0" that stopped behaving like one. `benchmarks/scan_sweep.sh` finds
+the real boundary (median of three runs, index resident, single core):
+
+| codes | index | p50 | ns per code |
+|---|---|---|---|
+| 100,000 | 1.5 MiB | 0.12 ms | 1.20 |
+| 150,000 | 2.3 MiB | 0.20 ms | 1.33 |
+| **200,000** | **3.1 MiB** | **0.29 ms** | **1.45** |
+| 250,000 | 3.8 MiB | 0.34 ms | 1.36 |
+| 400,000 | 6.1 MiB | 0.58 ms | 1.45 |
+| 2,000,000 | 30.5 MiB | 3.24 ms | 1.62 |
+| 8,000,000 | 122 MiB | 11.80 ms | 1.48 |
+
+The scan holds 1.2-1.6 ns per code across four orders of magnitude, so the budget
+alone fixes the ceiling: **about 200,000 vectors per core at 128-bit codes for a
+0.3 ms target**, roughly 750,000 for 1 ms. RAM on this 12 GB host would admit some
+750 million codes - three and a half orders of magnitude more than the latency
+budget allows. **The L0 cut belongs at the time boundary.** Anything beyond it needs
+a coarse partition so that a query touches a fraction of the corpus, and no such
+partition exists in this repository.
+
 **Container prerequisites.** `mlock` is capped by `RLIMIT_MEMLOCK`, which most
 container runtimes leave at 64 KB, so the call fails with `ENOMEM` on a segment of
 any real size. A process holding `CAP_IPC_LOCK` bypasses the cap entirely, which is
@@ -290,7 +315,8 @@ Establishing hard real-time bounds would require a bare-metal host with isolated
 ```
 src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (Apache-2.0)
 benchmarks/   run_benchmark.c (synthetic or .fvecs input) + cold_cache.c (page-cache
-              residency and cold-start cost) + eval_real_embeddings.py
+              residency and cold-start cost) + scan_sweep.sh (L0 size vs
+              latency budget) + eval_real_embeddings.py
               + bench_chroma.py (genesis-l0 vs ChromaDB)                      (Apache-2.0)
 tests/        Unit tests for the C core: 33 checks over srp_dot, srp_encode,
               srp_make_planes/offsets, srp_scan_topk, srp_rerank_topk, plus
