@@ -297,6 +297,60 @@ anything other than `SHM_PIN_LOCKED` as "page reclaim can evict the working set"
 
 ---
 
+### ⚖️ Against the Alternatives
+
+The algorithm here is not new. Sign random projections are Charikar 2002; FAISS
+ships `IndexBinaryFlat`, which runs the same POPCNT Hamming scan; Qdrant's binary
+quantization with oversampling and rescoring is the same two-stage cascade. So the
+only interesting question is what *this* implementation is good for, and the answer
+has to come from a measurement against the libraries people already run.
+
+`benchmarks/compare_engines.py` runs all contenders over the same vectors through
+one timing loop, single-threaded. Dataset as above: DBpedia entities, OpenAI
+`text-embedding-3-large` truncated to 512 dims and re-normalized, 100 held-out
+queries, k=10, LSH candidate pool 512.
+
+| engine | build | index | p50 | p99 | recall@10 |
+|---|---|---|---|---|---|
+| genesis-l0, 128-bit | 1.2 s | **1.5 MiB** | 0.446 ms | 0.648 ms | 56.3 % |
+| faiss `IndexBinaryFlat`, 128-bit, same codes | 0.0 s | 1.5 MiB | 0.674 ms | 1.408 ms | 56.3 % |
+| genesis-l0, 256-bit | 2.1 s | **3.0 MiB** | 0.703 ms | 1.243 ms | 82.2 % |
+| faiss `IndexBinaryFlat`, 256-bit, same codes | 0.0 s | 3.0 MiB | 0.958 ms | 1.855 ms | 82.2 % |
+| faiss `IndexFlatIP`, exact | 0.1 s | 195 MiB | 9.203 ms | 17.810 ms | 100 % |
+| **hnswlib**, M=16, ef=64 | 90.2 s | 201 MiB | **0.397 ms** | **0.573 ms** | **97.2 %** |
+
+*99,900 vectors. Timed through ctypes, which adds 1-2 us per call to the
+genesis-l0 rows and is why these figures sit above the C harness numbers earlier
+in this README.*
+
+**Read it plainly: above roughly 20-30k vectors, hnswlib wins on both axes.** At
+99,900 it is 1.8x faster than the 256-bit cascade *and* 15 points better on recall,
+with a tighter tail. If latency at scale is the requirement, use a graph index.
+The crossover is low: at 20,000 vectors the same comparison gives genesis-l0 at
+256 bits 0.233 ms against hnswlib's 0.241 ms, which is parity.
+
+What survives the comparison, and does so at every size:
+
+* **Index size: 67x smaller.** 3.0 MiB against 201 MiB. This is a different class,
+  not an optimisation, and it is the only number here that no amount of tuning on
+  the other side erases cheaply.
+* **Build: 43x faster, and streaming.** Encoding is O(1) per vector with no graph
+  to maintain, so inserts cost nothing to amortise. HNSW pays for every insert.
+* **Faster than FAISS on identical codes**, by 1.4-2.2x. Same algorithm, same
+  inputs, same candidate pool - that margin is implementation, and it is the one
+  claim here that is purely about the code in `src/`.
+* **No dependencies.** Four C files, no C++ runtime, no allocator in the hot path.
+
+That fixes the intended use: a compact, instantly-rebuilt hot set of up to roughly
+30k vectors living in shared memory beside the process that queries it - not a
+replacement for a vector database, and not a faster one.
+
+Two caveats in the other direction. The hnswlib build ran single-threaded; six
+threads would bring 90 s down to roughly 15 s. And hnswlib's footprint can be cut
+with its own quantization, which narrows the 67x. Neither was measured here.
+
+---
+
 ### 🔬 Measurement caveat
 
 Every figure in this README was obtained on a **shared VPS under a KVM hypervisor** (AMD EPYC, 6 vCPU, gcc 13.3, Linux 6.8) with non-zero background load. They characterise typical behaviour, not worst-case.
@@ -316,7 +370,8 @@ Establishing hard real-time bounds would require a bare-metal host with isolated
 src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (Apache-2.0)
 benchmarks/   run_benchmark.c (synthetic or .fvecs input) + cold_cache.c (page-cache
               residency and cold-start cost) + scan_sweep.sh (L0 size vs
-              latency budget) + eval_real_embeddings.py
+              latency budget) + compare_engines.py (vs faiss and hnswlib)
+              + eval_real_embeddings.py
               + bench_chroma.py (genesis-l0 vs ChromaDB)                      (Apache-2.0)
 tests/        Unit tests for the C core: 33 checks over srp_dot, srp_encode,
               srp_make_planes/offsets, srp_scan_topk, srp_rerank_topk, plus
