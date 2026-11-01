@@ -198,6 +198,80 @@ Ready-made bindings are not part of this repository yet. A minimal Python `ctype
 
 ---
 
+### 🧊 Residency, Cold Start and Container Limits
+
+The 4-5 us mmap read quoted above holds while the code index sits in page cache.
+At 33,234 codes the index is 531 KB, so it always does. That says nothing about an
+index which outgrows RAM. The question was raised by Svyatoslav Pavlov in a public
+thread, and `benchmarks/cold_cache.c` is the answer: it maps a file-backed index of
+arbitrary size, lets you drop it from page cache, and measures the first scan
+against the steady state.
+
+```bash
+cd benchmarks && make cold_cache
+head -c 1073741824 /dev/urandom > index.bin    # 1 GiB = 67,108,864 codes
+sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
+./cold_cache index.bin 20                      # append `pin` to mlock first
+```
+
+1 GiB index, 67,108,864 codes of 128 bits, same VPS as every other figure here,
+three runs per row:
+
+| scenario | paid up front | first query | steady p50 | penalty |
+|---|---|---|---|---|
+| page cache warm | - | at steady state | 93-101 ms | 1.0x |
+| cold, no pin | - | 1.29-1.69 s | 93-101 ms | **14-17x** |
+| cold, `mlock` held | 1.12-1.62 s | at steady state | 93-101 ms | 1.0x |
+| cold, unprivileged, `RLIMIT_MEMLOCK` 64 KB | 0.9 ms | 1.30 s | 94 ms | **14x** |
+
+Effective read rate during the cold first query: 643-852 MiB/s.
+
+Three things follow, and the third is the one that matters most:
+
+1. **Cold start costs about 1.3-1.7 s for a 1 GiB index on this host, once.**
+   `mlock` does not remove that cost, it relocates it: paid at startup instead of
+   inside the first query, which is where an agent loop can absorb it.
+2. **The `madvise` fallback is not a substitute for `mlock`.** `POSIX_MADV_WILLNEED`
+   is advice, not a synchronous read: it returns in under a millisecond and the first
+   query still pays in full. `SHM_PIN_ADVISED` means "no guarantee", not "almost as
+   good as locked".
+3. **At this corpus size storage is no longer the constraint; the scan is.** A steady
+   p50 of ~95 ms over 67M codes is the flat POPCNT scan being linear in `n`, with the
+   index fully resident. Past a few million vectors a coarse partition, or an external
+   tier such as the optional Qdrant/Weaviate box in the architecture diagram, is
+   required to stay inside a sub-millisecond budget. **Neither is implemented in this
+   repository.** The 0.3 ms figure belongs to a working set of tens of thousands of
+   vectors and does not extrapolate.
+
+**Container prerequisites.** `mlock` is capped by `RLIMIT_MEMLOCK`, which most
+container runtimes leave at 64 KB, so the call fails with `ENOMEM` on a segment of
+any real size. A process holding `CAP_IPC_LOCK` bypasses the cap entirely, which is
+why only the unprivileged row above falls back. `shm_ring_pin()` reports which level
+it reached rather than failing silently, so a deployment can assert on it:
+
+```yaml
+# docker compose
+services:
+  l0:
+    ulimits:
+      memlock: -1
+    cap_add: ["IPC_LOCK"]
+```
+
+```yaml
+# kubernetes: the capability is settable per container
+securityContext:
+  capabilities:
+    add: ["IPC_LOCK"]
+```
+
+Kubernetes has no per-container ulimit field, so if you need the limit raised rather
+than the capability granted, set it in the container runtime's default ulimits or in
+the image entrypoint. Either way, check the return of `shm_ring_pin()` and treat
+anything other than `SHM_PIN_LOCKED` as "page reclaim can evict the working set".
+
+---
+
 ### 🔬 Measurement caveat
 
 Every figure in this README was obtained on a **shared VPS under a KVM hypervisor** (AMD EPYC, 6 vCPU, gcc 13.3, Linux 6.8) with non-zero background load. They characterise typical behaviour, not worst-case.
@@ -215,7 +289,8 @@ Establishing hard real-time bounds would require a bare-metal host with isolated
 
 ```
 src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM mailbox  (Apache-2.0)
-benchmarks/   run_benchmark.c (synthetic or .fvecs input) + eval_real_embeddings.py
+benchmarks/   run_benchmark.c (synthetic or .fvecs input) + cold_cache.c (page-cache
+              residency and cold-start cost) + eval_real_embeddings.py
               + bench_chroma.py (genesis-l0 vs ChromaDB)                      (Apache-2.0)
 tests/        Unit tests for the C core: 33 checks over srp_dot, srp_encode,
               srp_make_planes/offsets, srp_scan_topk, srp_rerank_topk, plus

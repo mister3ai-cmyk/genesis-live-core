@@ -11,7 +11,10 @@ SRC      = ../src
 run_benchmark: run_benchmark.c $(SRC)/srp_lsh.c $(SRC)/shm_ring.c $(SRC)/srp_lsh.h $(SRC)/shm_ring.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ run_benchmark.c $(SRC)/srp_lsh.c $(SRC)/shm_ring.c $(LDLIBS)
 
+cold_cache: cold_cache.c $(SRC)/srp_lsh.c $(SRC)/shm_ring.c $(SRC)/srp_lsh.h $(SRC)/shm_ring.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ cold_cache.c $(SRC)/srp_lsh.c $(SRC)/shm_ring.c $(LDLIBS)
+
 clean:
-	rm -f run_benchmark *.o
+	rm -f run_benchmark cold_cache *.o
 
 .PHONY: clean
