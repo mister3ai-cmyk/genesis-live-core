@@ -13,6 +13,52 @@ Every number here was measured on a **virtualised shared host** and describes ty
 
 ---
 
+---
+
+### 🧭 Reproducing Every Figure Here
+
+Each number in this README comes from one command. Run them in `benchmarks/`
+unless stated otherwise. The defaults are the published configuration: a run
+with no extra flags reproduces the headline figures.
+
+| Figure | Command |
+|---|---|
+| 0.80 MB index, 128x compression, Recall 88.0 %, 105 us p50, 285 ns handoff | `make && ./run_benchmark` |
+| Recall on real OpenAI embeddings, up to 90.6 % | `python3 eval_real_embeddings.py` (downloads ~300 MB) |
+| vs faiss and hnswlib, 89.4 % at 33k | `python3 compare_engines.py --n 33234` |
+| Crossover with hnswlib at 50-70k | same, with `--n 50000`, `--n 70000` |
+| Recall vs candidate pool, 82.2 % to 97.7 % | `python3 tie_analysis.py` |
+| L0 ceiling vs latency budget, ~200k codes/core | `sh scan_sweep.sh <large-index>` |
+| Cold start 1.29-1.69 s, mlock behaviour | `make cold_cache && ./cold_cache <index> 20 [pin]` |
+| 33 unit checks on the C core | `cd ../tests && make check` |
+
+The Python comparisons need `numpy pyarrow faiss-cpu hnswlib`. Nothing else in
+this repository requires Python.
+
+**Read any figure with its configuration attached.** Recall depends on corpus
+size, code width and candidate pool at once: 128-bit codes give 56-68 % where
+256-bit with a 4096 pool give 97.7 %, on the same vectors. A figure quoted
+without `(n, bits, pool, centered)` is not reproducible, and none here is quoted
+that way.
+
+### 📦 What Is Not In This Repository
+
+So that a reader does not go looking for them:
+
+* **No Grassmannian or Cube-Split quantizer.** The engine encodes with sign
+  random projections at 128 or 256 bits, nothing else. Other compressors exist
+  in the author's research tree and are not part of this code or its numbers.
+* **No shared tensor ring beyond the mailbox.** `src/shm_ring.c` is a
+  single-slot mailbox for handoff. It is not a queue, a ring buffer or an IPC
+  framework, and the 285 ns figure is that mailbox and nothing larger.
+* **No hardware interfaces.** See the note on `research/` below: no CAN,
+  EtherCAT, ROS, serial or device driver appears anywhere in this repository.
+* **No AVX-512.** The scan uses `__builtin_popcountll`; there is not a single
+  SIMD intrinsic in `src/`, and the host CPU has no AVX-512 to use.
+* **No partitioning.** Every query scans the whole code array. Above the
+  ceiling measured below, that is the binding constraint and this repository
+  offers no answer to it.
+
 ### 🇪🇺 Digital Sovereignty & NGI Zero Restack Alignment
 
 *Submitted to NLnet NGI Zero Restack (Proposal #2026-11-322). Not yet funded.*

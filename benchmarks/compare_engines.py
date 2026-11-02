@@ -140,8 +140,10 @@ def main():
     ap.add_argument("--n", type=int, default=100000)
     ap.add_argument("--dim", type=int, default=512)
     ap.add_argument("--pool", type=int, default=512, help="LSH candidates re-ranked")
-    ap.add_argument("--center", action="store_true",
-                    help="mean-center against anisotropic embeddings")
+    # Centering is ON by default: it is the mode every published figure for
+    # this engine was measured in, so the default run must reproduce them.
+    ap.add_argument("--no-center", dest="center", action="store_false",
+                    help="disable mean-centering (not the published configuration)")
     args = ap.parse_args()
 
     print("loading %d vectors at %d dims..." % (args.n, args.dim))

@@ -51,6 +51,9 @@ def load_core(bits):
     lib.srp_encode.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int,
                                ctypes.POINTER(ctypes.c_float),
                                ctypes.POINTER(ctypes.c_float)]
+    lib.srp_make_offsets.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+                                     ctypes.POINTER(ctypes.c_float),
+                                     ctypes.POINTER(ctypes.c_float)]
     lib.srp_encode.restype = SrpCode
     lib.srp_scan_topk.argtypes = [ctypes.POINTER(SrpCode), ctypes.POINTER(SrpCode),
                                   ctypes.c_size_t, ctypes.c_size_t,
