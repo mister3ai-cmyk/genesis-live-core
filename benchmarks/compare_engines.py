@@ -64,6 +64,9 @@ def load_core(bits):
     lib.srp_encode.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int,
                                ctypes.POINTER(ctypes.c_float),
                                ctypes.POINTER(ctypes.c_float)]
+    lib.srp_make_offsets.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+                                     ctypes.POINTER(ctypes.c_float),
+                                     ctypes.POINTER(ctypes.c_float)]
     lib.srp_encode.restype = SrpCode
     lib.srp_scan_topk.argtypes = [ctypes.POINTER(SrpCode), ctypes.POINTER(SrpCode),
                                   ctypes.c_size_t, ctypes.c_size_t,
@@ -137,6 +140,8 @@ def main():
     ap.add_argument("--n", type=int, default=100000)
     ap.add_argument("--dim", type=int, default=512)
     ap.add_argument("--pool", type=int, default=512, help="LSH candidates re-ranked")
+    ap.add_argument("--center", action="store_true",
+                    help="mean-center against anisotropic embeddings")
     args = ap.parse_args()
 
     print("loading %d vectors at %d dims..." % (args.n, args.dim))
@@ -154,22 +159,29 @@ def main():
         planes = np.empty(bits * dim, dtype=np.float32)
         lib.srp_make_planes(fptr(planes), dim, 42)
 
+        off_ptr = None
+        if args.center:
+            mean = np.ascontiguousarray(db.mean(axis=0))
+            offsets = np.empty(bits, dtype=np.float32)
+            lib.srp_make_offsets(fptr(planes), dim, fptr(mean), fptr(offsets))
+            off_ptr = fptr(offsets)
+
         t0 = time.perf_counter()
         codes = (SrpCode * n)()
         for i in range(n):
-            codes[i] = lib.srp_encode(fptr(planes), dim, fptr(db[i]), None)
+            codes[i] = lib.srp_encode(fptr(planes), dim, fptr(db[i]), off_ptr)
         build_genesis = time.perf_counter() - t0
         cand = (ctypes.c_uint32 * args.pool)()
         out = (ctypes.c_uint32 * K)()
 
-        def q_genesis(q, lib=lib, codes=codes, planes=planes):
-            qc = lib.srp_encode(fptr(planes), dim, fptr(q), None)
+        def q_genesis(q, lib=lib, codes=codes, planes=planes, off=off_ptr):
+            qc = lib.srp_encode(fptr(planes), dim, fptr(q), off)
             m = lib.srp_scan_topk(ctypes.byref(qc), codes, n, args.pool, cand)
             got = lib.srp_rerank_topk(fptr(db), dim, fptr(q), cand, m, K, out)
             return [out[i] for i in range(got)]
 
         g, p50, p99 = timed(q_genesis, queries)
-        rows.append(("genesis-l0 %db + re-rank" % bits, build_genesis,
+        rows.append(("genesis-l0 %db%s + re-rank" % (bits, " centered" if args.center else ""), build_genesis,
                      n * bits // 8, p50, p99, recall(g, truth, K)))
 
         import faiss
@@ -180,8 +192,8 @@ def main():
         fb.add(packed)
         build_fb = time.perf_counter() - t0
 
-        def q_faiss_bin(q, lib=lib, fb=fb, planes=planes, bits=bits):
-            qc = lib.srp_encode(fptr(planes), dim, fptr(q), None)
+        def q_faiss_bin(q, lib=lib, fb=fb, planes=planes, bits=bits, off=off_ptr):
+            qc = lib.srp_encode(fptr(planes), dim, fptr(q), off)
             qp = np.frombuffer(bytes(qc), dtype=np.uint8).reshape(1, bits // 8)
             _, idx = fb.search(qp, args.pool)
             c = idx[0]

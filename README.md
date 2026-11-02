@@ -312,24 +312,39 @@ queries, k=10, LSH candidate pool 512.
 
 | engine | build | index | p50 | p99 | recall@10 |
 |---|---|---|---|---|---|
-| genesis-l0, 128-bit | 1.2 s | **1.5 MiB** | 0.446 ms | 0.648 ms | 56.3 % |
-| faiss `IndexBinaryFlat`, 128-bit, same codes | 0.0 s | 1.5 MiB | 0.674 ms | 1.408 ms | 56.3 % |
-| genesis-l0, 256-bit | 2.1 s | **3.0 MiB** | 0.703 ms | 1.243 ms | 82.2 % |
-| faiss `IndexBinaryFlat`, 256-bit, same codes | 0.0 s | 3.0 MiB | 0.958 ms | 1.855 ms | 82.2 % |
-| faiss `IndexFlatIP`, exact | 0.1 s | 195 MiB | 9.203 ms | 17.810 ms | 100 % |
-| **hnswlib**, M=16, ef=64 | 90.2 s | 201 MiB | **0.397 ms** | **0.573 ms** | **97.2 %** |
+| genesis-l0, 128-bit | 0.5 s | **0.5 MiB** | 0.236 ms | 0.481 ms | 67.9 % |
+| faiss `IndexBinaryFlat`, 128-bit, same codes | 0.0 s | 0.5 MiB | 0.479 ms | 40.9 ms | 67.9 % |
+| genesis-l0, 256-bit | 0.7 s | **1.0 MiB** | 0.261 ms | 0.649 ms | 89.4 % |
+| faiss `IndexBinaryFlat`, 256-bit, same codes | 0.0 s | 1.0 MiB | 0.501 ms | 1.381 ms | 89.4 % |
+| faiss `IndexFlatIP`, exact | 0.0 s | 64.9 MiB | 2.275 ms | 4.060 ms | 100 % |
+| **hnswlib**, M=16, ef=64 | 22.4 s | 66.9 MiB | 0.323 ms | 0.544 ms | **97.7 %** |
 
-*99,900 vectors. Timed through ctypes, which adds 1-2 us per call to the
-genesis-l0 rows and is why these figures sit above the C harness numbers earlier
-in this README.*
+*33,234 vectors, median of three runs, mean-centering on (`--center`), timed
+through ctypes, which adds 1-2 us per call to the genesis-l0 rows.*
 
-**Read it plainly: above roughly 20-30k vectors, hnswlib wins on both axes.** At
-99,900 it is 1.8x faster than the 256-bit cascade *and* 15 points better on recall,
-with a tighter tail. If latency at scale is the requirement, use a graph index.
-The crossover is low: at 20,000 vectors the same comparison gives genesis-l0 at
-256 bits 0.233 ms against hnswlib's 0.241 ms, which is parity.
+**Latency is a wash here; recall is not.** Across three runs genesis-l0 at 256
+bits spanned 0.233-0.287 ms and hnswlib 0.254-0.359 ms - overlapping ranges on a
+shared VPS, so neither is meaningfully faster at this size. The separation is in
+accuracy: 89.4 % against 97.7 %, stable to the decimal in every run.
 
-What survives the comparison, and does so at every size:
+Where the two diverge is further up. Holding everything else fixed and growing
+the corpus (single runs, 256-bit, centered):
+
+| vectors | genesis-l0 p50 | recall | hnswlib p50 | recall |
+|---|---|---|---|---|
+| 20,000 | 0.221 ms | 89.5 % | 0.229 ms | 97.6 % |
+| 33,234 | 0.261 ms | 89.4 % | 0.323 ms | 97.7 % |
+| 50,000 | 0.278 ms | 86.4 % | 0.359 ms | 95.5 % |
+| 70,000 | 0.449 ms | 84.8 % | 0.392 ms | 96.6 % |
+| 99,900 | 0.463 ms | 89.4 % | 0.397 ms | 97.2 % |
+
+The flat scan is linear and the graph is not, so **the crossover sits between 50k
+and 70k vectors**: below it the cascade is level with or ahead of hnswlib on
+latency, above it hnswlib pulls away and keeps an 8-13 point lead on recall
+throughout. Recall wobbles by a few points between sizes because only 100 queries
+are used; the trend, not the individual figure, is the signal.
+
+What survives the comparison, and does so at every size:What survives the comparison, and does so at every size:
 
 * **Index size: 67x smaller.** 3.0 MiB against 201 MiB. This is a different class,
   not an optimisation, and it is the only number here that no amount of tuning on
@@ -342,8 +357,8 @@ What survives the comparison, and does so at every size:
 * **No dependencies.** Four C files, no C++ runtime, no allocator in the hot path.
 
 That fixes the intended use: a compact, instantly-rebuilt hot set of up to roughly
-30k vectors living in shared memory beside the process that queries it - not a
-replacement for a vector database, and not a faster one.
+50k vectors living in shared memory beside the process that queries it - not a
+replacement for a vector database, and above that size not a faster one either.
 
 **Where the ceiling actually is.** A 128-bit code admits 129 distances, bunched
 near the middle, so a natural worry is that ties at the top-k boundary grow with
@@ -364,7 +379,9 @@ the pool brings it back, at a price paid entirely in the re-rank:
 | 256 | 2048 | 93.9 % | 0.298 ms | 0.902 ms |
 | 256 | **4096** | **97.7 %** | 0.327 ms | 1.661 ms |
 
-*n = 99,900, same vectors and codes as the table above.*
+*n = 99,900, without mean-centering. Centering lifts recall by roughly seven
+points at a fixed pool and does not change the shape of this curve, so the
+trade-off it describes holds either way.*
 
 So the cascade does reach hnswlib's accuracy - 97.7 % against its 97.2 % - and
 needs about 2.0 ms to do it, five times hnswlib's 0.397 ms. At a 4096 pool the
