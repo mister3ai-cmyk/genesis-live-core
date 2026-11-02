@@ -11,8 +11,14 @@ supports shortening: truncate + L2-normalize). Recall is computed by the
 C binary and re-checked here against an independent numpy brute force.
 
 Requirements: pip install numpy pyarrow
-Usage:        python3 benchmarks/eval_real_embeddings.py [--center]
-              (extra flags are passed through to run_benchmark)
+By default this builds and runs the *published* configuration: 256-bit codes,
+a 512-candidate pool and mean-centering, which is what the 90.6 % figure in the
+README refers to. Run with --defaults to get the 128-bit / 128-pool build
+instead, which scores near 43 % on this dataset - the difference is the
+configuration, not the engine.
+
+Usage:        python3 benchmarks/eval_real_embeddings.py [--defaults]
+              (any other flags are passed through to run_benchmark)
 
 Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
 """
@@ -89,8 +95,22 @@ def main():
     parquet = os.path.join(CACHE, os.path.basename(URL))
     download(URL, parquet)
 
-    if not os.path.exists(BINARY):
-        subprocess.run(["make", "-C", HERE], check=True)
+    published = "--defaults" not in sys.argv
+    extra_args = [a for a in sys.argv[1:] if a != "--defaults"]
+    env_flags = []
+    if published:
+        # Build the configuration every published figure was measured in, so
+        # that a plain run of this script reproduces the README instead of a
+        # weaker variant of it. 128-bit codes with a 128-candidate pool score
+        # near 43 % on this dataset; that is the configuration, not the engine.
+        env_flags = ["CPPFLAGS=-DSRP_BITS=256 -DK_CAND=512"]
+        if "--center" not in extra_args:
+            extra_args.append("--center")
+        print("configuration: 256-bit codes, pool 512, mean-centered "
+              "(the published one; --defaults gives 128-bit / pool 128)")
+    # -B unconditionally: the flags above change the binary, and a stale
+    # build would silently report a different configuration than it claims.
+    subprocess.run(["make", "-B", "-C", HERE] + env_flags, check=True)
 
     column, full = load_embeddings(parquet)
     rng = np.random.default_rng(0)
@@ -111,7 +131,7 @@ def main():
         write_fvecs(q_path, queries)
 
         out = subprocess.run([BINARY, "--data", d_path, "--queries", q_path, "--out", o_path]
-                             + sys.argv[1:],
+                             + extra_args,
                              check=True, capture_output=True, text=True).stdout
         print(out)
         c_recall = float(re.search(r"Recall 10@10:\s+([\d.]+)", out).group(1))
