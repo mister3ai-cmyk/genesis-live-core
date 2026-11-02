@@ -27,7 +27,7 @@ with no extra flags reproduces the headline figures.
 | Recall on real OpenAI embeddings, up to 90.6 % | `python3 eval_real_embeddings.py` (downloads ~300 MB) |
 | vs faiss and hnswlib, 89.4 % at 33k | `python3 compare_engines.py --n 33234` |
 | Crossover with hnswlib at 50-70k | same, with `--n 50000`, `--n 70000` |
-| Recall vs candidate pool, 82.2 % to 97.7 % | `python3 tie_analysis.py` |
+| Recall vs candidate pool, 89.4 % to 98.6 % | `python3 tie_analysis.py` |
 | L0 ceiling vs latency budget, ~200k codes/core | `sh scan_sweep.sh <large-index>` |
 | Cold start 1.29-1.69 s, mlock behaviour | `make cold_cache && ./cold_cache <index> 20 [pin]` |
 | 33 unit checks on the C core | `cd ../tests && make check` |
@@ -36,8 +36,8 @@ The Python comparisons need `numpy pyarrow faiss-cpu hnswlib`. Nothing else in
 this repository requires Python.
 
 **Read any figure with its configuration attached.** Recall depends on corpus
-size, code width and candidate pool at once: 128-bit codes give 56-68 % where
-256-bit with a 4096 pool give 97.7 %, on the same vectors. A figure quoted
+size, code width and candidate pool at once: 128-bit codes give 63-70 % where
+256-bit with a 4096 pool give 98.6 %, on the same vectors. A figure quoted
 without `(n, bits, pool, centered)` is not reproducible, and none here is quoted
 that way.
 
@@ -410,29 +410,29 @@ replacement for a vector database, and above that size not a faster one either.
 near the middle, so a natural worry is that ties at the top-k boundary grow with
 the corpus until collisions, not similarity, decide the candidate pool.
 `benchmarks/tie_analysis.py` measures it, and that is not what binds: the median
-tie set at the k-th boundary is 4-7 codes, about 1 % of a 512 pool, and nearly
-flat in n (6.0 to 7.0 from 20k to 100k at 128 bits, a steady 4.0 at 256 bits).
+tie set at the k-th boundary is 3-6 codes, about 1 % of a 512 pool, and nearly
+flat in n (6.0 at both 20k and 100k for 128-bit codes, 3-4 throughout at 256).
 
 What binds is pool coverage. The pool is fixed while the corpus grows, so recall
-falls - 65.8 %, 60.8 %, 56.3 % at 128 bits across 20k, 50k and 100k - and growing
+falls - 70.2 %, 67.6 %, 63.2 % at 128 bits across 20k, 50k and 100k - and growing
 the pool brings it back, at a price paid entirely in the re-rank:
 
 | bits | pool | recall@10 | scan | re-rank |
 |---|---|---|---|---|
-| 128 | 512 | 56.3 % | 0.162 ms | 0.272 ms |
-| 128 | 4096 | 86.2 % | 0.195 ms | 1.662 ms |
-| 256 | 512 | 82.2 % | 0.280 ms | 0.260 ms |
-| 256 | 2048 | 93.9 % | 0.298 ms | 0.902 ms |
-| 256 | **4096** | **97.7 %** | 0.327 ms | 1.661 ms |
+| 128 | 512 | 63.2 % | 0.183 ms | 0.277 ms |
+| 128 | 4096 | 91.6 % | 0.262 ms | 2.070 ms |
+| 256 | 512 | 89.4 % | 0.297 ms | 0.315 ms |
+| 256 | 1024 | 94.9 % | 0.288 ms | 0.550 ms |
+| 256 | **2048** | **97.3 %** | 0.281 ms | 0.962 ms |
+| 256 | 4096 | 98.6 % | 0.301 ms | 1.724 ms |
 
-*n = 99,900, without mean-centering. Centering lifts recall by roughly seven
-points at a fixed pool and does not change the shape of this curve, so the
-trade-off it describes holds either way.*
+*n = 99,900, mean-centered, same vectors and codes as the table above.*
 
-So the cascade does reach hnswlib's accuracy - 97.7 % against its 97.2 % - and
-needs about 2.0 ms to do it, five times hnswlib's 0.397 ms. At a 4096 pool the
-re-rank is 84 % of the query, while the Hamming scan barely moves. **Quality and
-budget are not two ceilings but one, traded against each other by the pool size.**
+So the cascade reaches hnswlib's accuracy at a 2048 pool - 97.3 % against its
+97.2 % - and needs about 1.24 ms to do it, three times hnswlib's 0.397 ms. The
+scan barely moves across the whole sweep while the re-rank grows linearly with
+the pool, taking 77 % of the query at 2048 and 85 % at 4096. **Quality and budget
+are not two ceilings but one, traded against each other by the pool size.**
 Choosing a pool is choosing a point on that curve, and the 0.3 ms figure sits at
 the fast, inaccurate end of it.
 
