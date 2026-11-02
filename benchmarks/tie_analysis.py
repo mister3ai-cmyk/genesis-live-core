@@ -103,6 +103,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dim", type=int, default=512)
     ap.add_argument("--pool", type=int, default=512)
+    # On by default, as everywhere else in benchmarks/: the published figures
+    # for this engine are all mean-centered.
+    ap.add_argument("--no-center", dest="center", action="store_false",
+                    help="disable mean-centering")
     args = ap.parse_args()
 
     big_db, queries = load_vectors(max(SIZES), args.dim)
@@ -123,9 +127,17 @@ def main():
             if n > len(big_db):
                 continue
             db = big_db[:n]
+            off_ptr = None
+            if args.center:
+                mean = np.ascontiguousarray(db.mean(axis=0))
+                offsets = np.empty(bits, dtype=np.float32)
+                lib.srp_make_offsets(fptr(planes), args.dim, fptr(mean),
+                                     fptr(offsets))
+                off_ptr = fptr(offsets)
             codes = (SrpCode * n)()
             for i in range(n):
-                codes[i] = lib.srp_encode(fptr(planes), args.dim, fptr(db[i]), None)
+                codes[i] = lib.srp_encode(fptr(planes), args.dim, fptr(db[i]),
+                                          off_ptr)
             packed = np.frombuffer(bytes(codes), dtype=np.uint8).reshape(n, nbytes)
 
             cand = (ctypes.c_uint32 * args.pool)()
@@ -133,7 +145,7 @@ def main():
             dk, ties, hits, t_scan, t_rank = [], [], 0, 0.0, 0.0
 
             for q in queries:
-                qc = lib.srp_encode(fptr(planes), args.dim, fptr(q), None)
+                qc = lib.srp_encode(fptr(planes), args.dim, fptr(q), off_ptr)
                 qp = np.frombuffer(bytes(qc), dtype=np.uint8).reshape(1, nbytes)
 
                 # the distance at the k-th boundary, and how many share it
@@ -172,15 +184,22 @@ def main():
         planes = np.empty(bits * args.dim, dtype=np.float32)
         lib.srp_make_planes(fptr(planes), args.dim, 42)
         n = len(big_db)
+        off_ptr = None
+        if args.center:
+            mean = np.ascontiguousarray(big_db.mean(axis=0))
+            offsets = np.empty(bits, dtype=np.float32)
+            lib.srp_make_offsets(fptr(planes), args.dim, fptr(mean), fptr(offsets))
+            off_ptr = fptr(offsets)
         codes = (SrpCode * n)()
         for i in range(n):
-            codes[i] = lib.srp_encode(fptr(planes), args.dim, fptr(big_db[i]), None)
+            codes[i] = lib.srp_encode(fptr(planes), args.dim, fptr(big_db[i]),
+                                      off_ptr)
         for pool in (512, 1024, 2048, 4096):
             cand = (ctypes.c_uint32 * pool)()
             out = (ctypes.c_uint32 * K)()
             hits, t_scan, t_rank = 0, 0.0, 0.0
             for q in queries:
-                qc = lib.srp_encode(fptr(planes), args.dim, fptr(q), None)
+                qc = lib.srp_encode(fptr(planes), args.dim, fptr(q), off_ptr)
                 t0 = time.perf_counter()
                 m = lib.srp_scan_topk(ctypes.byref(qc), codes, n, pool, cand)
                 t1 = time.perf_counter()

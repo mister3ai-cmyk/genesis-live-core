@@ -4,7 +4,16 @@
 # rather than by memory. Needs cold_cache built and a large index to slice.
 #   ./scan_sweep.sh /path/to/index.bin
 set -eu
-BIG=${1:?usage: scan_sweep.sh <large-index-file>}
+if [ $# -lt 1 ]; then
+    echo "usage: scan_sweep.sh <large-index-file>"
+    echo
+    echo "The file is a flat array of SRP codes; any size works, 1 GiB is plenty."
+    echo "Random bytes are valid codes, so make one with:"
+    echo "    head -c 1073741824 /dev/urandom > index.bin"
+    echo "Build cold_cache first:  make cold_cache"
+    exit 1
+fi
+BIG=$1
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 printf '%-12s %-10s %s

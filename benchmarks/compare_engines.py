@@ -135,7 +135,25 @@ def timed(fn, queries):
 
 # ----------------------------------------------------------------- main
 
+def require(*modules):
+    """Fail before the expensive part, not in the middle of it."""
+    missing = []
+    for m in modules:
+        try:
+            __import__(m)
+        except ImportError:
+            missing.append(m)
+    if missing:
+        names = {"faiss": "faiss-cpu", "hnswlib": "hnswlib",
+                 "pyarrow": "pyarrow", "numpy": "numpy"}
+        sys.exit("missing: %s
+  pip install %s"
+                 % (", ".join(missing),
+                    " ".join(names.get(m, m) for m in missing)))
+
+
 def main():
+    require("numpy", "pyarrow", "faiss", "hnswlib")
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=100000)
     ap.add_argument("--dim", type=int, default=512)
