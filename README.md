@@ -89,9 +89,14 @@ that way.
 
 So that a reader does not go looking for them:
 
-* **No Grassmannian or Cube-Split quantizer.** The engine encodes with sign
-  random projections at 128 or 256 bits, nothing else. Other compressors exist
-  in the author's research tree and are not part of this code or its numbers.
+* **The shipped engine uses no Grassmannian projection.** `src/` encodes with
+  sign random projections at 128 or 256 bits, nothing else, and every figure in
+  this README above the research sections comes from that path. A Grassmannian
+  implementation does live here, in `research/ngp45_engine/grassmannian_manifold.py`
+  with a FAISS comparison in `research/legacy_benchmarks/`, under BSL 1.1 and off
+  the query path. **It reports a different compression ratio** - 4 bytes per
+  vector against 512-dim float32 is 512x, where the 128-bit code in `src/` is
+  128x - so check which path a figure belongs to before comparing two of them.
 * **No shared tensor ring beyond the mailbox.** `src/shm_ring.c` is a
   single-slot mailbox for handoff. It is not a queue, a ring buffer or an IPC
   framework, and the 285 ns figure is that mailbox and nothing larger.
