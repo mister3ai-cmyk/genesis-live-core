@@ -345,6 +345,34 @@ That fixes the intended use: a compact, instantly-rebuilt hot set of up to rough
 30k vectors living in shared memory beside the process that queries it - not a
 replacement for a vector database, and not a faster one.
 
+**Where the ceiling actually is.** A 128-bit code admits 129 distances, bunched
+near the middle, so a natural worry is that ties at the top-k boundary grow with
+the corpus until collisions, not similarity, decide the candidate pool.
+`benchmarks/tie_analysis.py` measures it, and that is not what binds: the median
+tie set at the k-th boundary is 4-7 codes, about 1 % of a 512 pool, and nearly
+flat in n (6.0 to 7.0 from 20k to 100k at 128 bits, a steady 4.0 at 256 bits).
+
+What binds is pool coverage. The pool is fixed while the corpus grows, so recall
+falls - 65.8 %, 60.8 %, 56.3 % at 128 bits across 20k, 50k and 100k - and growing
+the pool brings it back, at a price paid entirely in the re-rank:
+
+| bits | pool | recall@10 | scan | re-rank |
+|---|---|---|---|---|
+| 128 | 512 | 56.3 % | 0.162 ms | 0.272 ms |
+| 128 | 4096 | 86.2 % | 0.195 ms | 1.662 ms |
+| 256 | 512 | 82.2 % | 0.280 ms | 0.260 ms |
+| 256 | 2048 | 93.9 % | 0.298 ms | 0.902 ms |
+| 256 | **4096** | **97.7 %** | 0.327 ms | 1.661 ms |
+
+*n = 99,900, same vectors and codes as the table above.*
+
+So the cascade does reach hnswlib's accuracy - 97.7 % against its 97.2 % - and
+needs about 2.0 ms to do it, five times hnswlib's 0.397 ms. At a 4096 pool the
+re-rank is 84 % of the query, while the Hamming scan barely moves. **Quality and
+budget are not two ceilings but one, traded against each other by the pool size.**
+Choosing a pool is choosing a point on that curve, and the 0.3 ms figure sits at
+the fast, inaccurate end of it.
+
 Two caveats in the other direction. The hnswlib build ran single-threaded; six
 threads would bring 90 s down to roughly 15 s. And hnswlib's footprint can be cut
 with its own quantization, which narrows the 67x. Neither was measured here.
@@ -371,6 +399,7 @@ src/          C99 core: SRP-LSH (128/256-bit) + POPCNT scan, exact re-rank, SHM 
 benchmarks/   run_benchmark.c (synthetic or .fvecs input) + cold_cache.c (page-cache
               residency and cold-start cost) + scan_sweep.sh (L0 size vs
               latency budget) + compare_engines.py (vs faiss and hnswlib)
+              + tie_analysis.py (recall vs pool vs corpus)
               + eval_real_embeddings.py
               + bench_chroma.py (genesis-l0 vs ChromaDB)                      (Apache-2.0)
 tests/        Unit tests for the C core: 33 checks over srp_dot, srp_encode,
