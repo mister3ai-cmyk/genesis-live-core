@@ -13,66 +13,6 @@ Every number here was measured on a **virtualised shared host** and describes ty
 
 ---
 
----
-
-### 🧭 Reproducing Every Figure Here
-
-Each number in this README comes from one command. Run them in `benchmarks/`
-unless stated otherwise. The defaults are the published configuration: a run
-with no extra flags reproduces the headline figures.
-
-| Figure | Command |
-|---|---|
-| 0.80 MB index, 128x compression, Recall 88.0 %, 105 us p50, 285 ns handoff | `make && ./run_benchmark` |
-| Recall on real OpenAI embeddings, up to 90.6 % | `python3 eval_real_embeddings.py` (downloads ~300 MB) |
-| vs faiss and hnswlib, 89.4 % at 33k | `python3 compare_engines.py --n 33234` |
-| Crossover with hnswlib at 50-70k | same, with `--n 50000`, `--n 70000` |
-| Recall vs candidate pool, 89.4 % to 98.6 % | `python3 tie_analysis.py` |
-| L0 ceiling vs latency budget, ~200k codes/core | `sh scan_sweep.sh <large-index>` |
-| Cold start 1.29-1.69 s, mlock behaviour | `make cold_cache && ./cold_cache <index> 20 [pin]` |
-| 33 unit checks on the C core | `cd ../tests && make check` |
-
-The Python comparisons need `numpy pyarrow faiss-cpu hnswlib`. Nothing else in
-this repository requires Python.
-
-**Read any figure with its configuration attached.** Recall depends on corpus
-size, code width and candidate pool at once: 128-bit codes give 63-70 % where
-256-bit with a 4096 pool give 98.6 %, on the same vectors. A figure quoted
-without `(n, bits, pool, centered)` is not reproducible, and none here is quoted
-that way.
-
-### 📦 What Is Not In This Repository
-
-So that a reader does not go looking for them:
-
-* **No Grassmannian or Cube-Split quantizer.** The engine encodes with sign
-  random projections at 128 or 256 bits, nothing else. Other compressors exist
-  in the author's research tree and are not part of this code or its numbers.
-* **No shared tensor ring beyond the mailbox.** `src/shm_ring.c` is a
-  single-slot mailbox for handoff. It is not a queue, a ring buffer or an IPC
-  framework, and the 285 ns figure is that mailbox and nothing larger.
-* **No hardware interfaces.** See the note on `research/` below: no CAN,
-  EtherCAT, ROS, serial or device driver appears anywhere in this repository.
-* **No AVX-512.** The scan uses `__builtin_popcountll`; there is not a single
-  SIMD intrinsic in `src/`, and the host CPU has no AVX-512 to use.
-* **No partitioning.** Every query scans the whole code array. Above the
-  ceiling measured below, that is the binding constraint and this repository
-  offers no answer to it.
-
-### 🇪🇺 Digital Sovereignty & NGI Zero Restack Alignment
-
-*Submitted to NLnet NGI Zero Restack (Proposal #2026-11-322). Not yet funded.*
-
-* **No remote dependency on the query path.** The engine is a C99 library running inside the host process: encode → hardware `POPCNT` Hamming scan → exact re-rank. No socket, RPC or external service is involved, and the hot loop issues 0 syscalls. When the caller lives in another process, the handoff is a POSIX shared-memory mailbox (`shm_open` + `mmap`, atomic load/store only), measured at 30–280 ns p50 one-way.
-* **Local, air-gapped operation.** The index is built from local `.fvecs` files. There is no telemetry, no licence server and no remote embedding endpoint. Building needs a C99 compiler, libc, `libm`, `librt` and pthreads. Network access is used only by the optional evaluation script that downloads a public dataset.
-* **Commodity hardware.** The stage-1 index for 50,000 × 512-dim vectors is 0.80 MB and the measurements above run on one core of a shared VPS, without a GPU or a managed database service.
-* **Data stays with its owner, in open formats.** The core is Apache-2.0, exposed as a plain C ABI, and reads and writes the standard `.fvecs` / `.ivecs` formats. Planned work (Milestone 2) stores the index in a single user-owned SQLite file with ACID transactions.
-* **Limits.** Search is approximate: Recall 10@10 is 88.0–99.3 % on synthetic data and up to 90.6 % on OpenAI embeddings (see below). This is a single-host engine, not a distributed database.
-
-Milestones, deliverables and acceptance criteria: [ROADMAP_NLNET.md](ROADMAP_NLNET.md).
-
----
-
 ### ⚡ 10-Second Reproducible Benchmark
 
 Run this single command on any modern Linux machine (GCC or Clang, 2+ CPUs, no other dependencies):
@@ -118,6 +58,50 @@ Exact f32 brute force:  213 QPS (single core, recall 100 %)
 * **Cross-process handoff (one-way):** p50 **30–290 ns**, p99 **35–456 ns**, p99.9 **40–6,715 ns** across 8 runs. The spread depends on which physical cores the hypervisor gives the two vCPUs. Measured as `/dev/shm` ping-pong between two pinned processes, timed with `rdtsc`, round trip ÷ 2.
 
 ---
+
+### 🧭 Reproducing Every Figure Here
+
+Each number in this README comes from one command. Run them in `benchmarks/`
+unless stated otherwise. The defaults are the published configuration: a run
+with no extra flags reproduces the headline figures.
+
+| Figure | Command |
+|---|---|
+| 0.80 MB index, 128x compression, Recall 88.0 %, 105 us p50, 285 ns handoff | `make && ./run_benchmark` |
+| Recall on real OpenAI embeddings, up to 90.6 % | `python3 eval_real_embeddings.py` (downloads ~300 MB) |
+| vs faiss and hnswlib, 89.4 % at 33k | `python3 compare_engines.py --n 33234` |
+| Crossover with hnswlib at 50-70k | same, with `--n 50000`, `--n 70000` |
+| Recall vs candidate pool, 89.4 % to 98.6 % | `python3 tie_analysis.py` |
+| L0 ceiling vs latency budget, ~200k codes/core | `sh scan_sweep.sh <large-index>` |
+| Cold start 1.29-1.69 s, mlock behaviour | `make cold_cache && ./cold_cache <index> 20 [pin]` |
+| 33 unit checks on the C core | `cd ../tests && make check` |
+
+The Python comparisons need `numpy pyarrow faiss-cpu hnswlib`. Nothing else in
+this repository requires Python.
+
+**Read any figure with its configuration attached.** Recall depends on corpus
+size, code width and candidate pool at once: 128-bit codes give 63-70 % where
+256-bit with a 4096 pool give 98.6 %, on the same vectors. A figure quoted
+without `(n, bits, pool, centered)` is not reproducible, and none here is quoted
+that way.
+
+### 📦 What Is Not In This Repository
+
+So that a reader does not go looking for them:
+
+* **No Grassmannian or Cube-Split quantizer.** The engine encodes with sign
+  random projections at 128 or 256 bits, nothing else. Other compressors exist
+  in the author's research tree and are not part of this code or its numbers.
+* **No shared tensor ring beyond the mailbox.** `src/shm_ring.c` is a
+  single-slot mailbox for handoff. It is not a queue, a ring buffer or an IPC
+  framework, and the 285 ns figure is that mailbox and nothing larger.
+* **No hardware interfaces.** See the note on `research/` below: no CAN,
+  EtherCAT, ROS, serial or device driver appears anywhere in this repository.
+* **No AVX-512.** The scan uses `__builtin_popcountll`; there is not a single
+  SIMD intrinsic in `src/`, and the host CPU has no AVX-512 to use.
+* **No partitioning.** Every query scans the whole code array. Above the
+  ceiling measured below, that is the binding constraint and this repository
+  offers no answer to it.
 
 ### 🏛️ Architecture: The Computational Endosymbiont
 
@@ -478,6 +462,20 @@ engine. Those modules import nothing beyond `numpy` and the standard library: th
 are no device drivers, no fieldbus or robotics interfaces, and no hardware in the
 loop. Nothing in `research/` is required to build or run the core or the benchmarks,
 and none of it should be read as a validated or deployable component.
+
+---
+
+### 🇪🇺 Digital Sovereignty & NGI Zero Restack Alignment
+
+*Submitted to NLnet NGI Zero Restack (Proposal #2026-11-322). Not yet funded.*
+
+* **No remote dependency on the query path.** The engine is a C99 library running inside the host process: encode → hardware `POPCNT` Hamming scan → exact re-rank. No socket, RPC or external service is involved, and the hot loop issues 0 syscalls. When the caller lives in another process, the handoff is a POSIX shared-memory mailbox (`shm_open` + `mmap`, atomic load/store only), measured at 30–280 ns p50 one-way.
+* **Local, air-gapped operation.** The index is built from local `.fvecs` files. There is no telemetry, no licence server and no remote embedding endpoint. Building needs a C99 compiler, libc, `libm`, `librt` and pthreads. Network access is used only by the optional evaluation script that downloads a public dataset.
+* **Commodity hardware.** The stage-1 index for 50,000 × 512-dim vectors is 0.80 MB and the measurements above run on one core of a shared VPS, without a GPU or a managed database service.
+* **Data stays with its owner, in open formats.** The core is Apache-2.0, exposed as a plain C ABI, and reads and writes the standard `.fvecs` / `.ivecs` formats. Planned work (Milestone 2) stores the index in a single user-owned SQLite file with ACID transactions.
+* **Limits.** Search is approximate: Recall 10@10 is 88.0–99.3 % on synthetic data and up to 90.6 % on OpenAI embeddings (see below). This is a single-host engine, not a distributed database.
+
+Milestones, deliverables and acceptance criteria: [ROADMAP_NLNET.md](ROADMAP_NLNET.md).
 
 ---
 
