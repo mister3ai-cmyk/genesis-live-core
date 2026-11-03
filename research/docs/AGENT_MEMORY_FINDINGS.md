@@ -99,18 +99,93 @@ The zero writes are not an adapter fault: driven directly, Grok calls
 `write_observation` correctly on the first opportunity. They are a fault in the
 task set — see below.
 
-## 5. A third defect, in the task set, not yet fixed
+## 5. Chained tasks: what writing is worth
 
-The 40 tasks are independent of one another. Nothing in turn 12 needs anything
-from turn 3, so `write_observation` has no work to do: Haiku wrote 39 notes
-because it was told to, Grok wrote none because nothing required it. The 21 %
-write fraction is therefore an artefact of one model's disposition and should
-not be read against the 5 % crossover in `benchmarks/mixed_workload.py`.
+The independent tasks above measure retrieval cost and nothing else — nothing in
+turn 12 needs anything from turn 3, so `write_observation` has no work to do.
+Haiku wrote 39 notes because the prompt told it to and Grok wrote none because
+nothing required it, which is why the 21 % write fraction is a disposition and
+not a workload.
 
-The architecture's own case is a swarm accumulating closed context over a
-session, which means **chained tasks** where later turns depend on earlier
-findings. Until the task set has chains, this stand measures retrieval traffic
-and context cost honestly, and measures the value of writing not at all.
+`--mode chained` fixes that. Six chains introduce a fact, revoke or revise it
+later, and ask about it twenty turns on: a calibration whose three figures are
+each overwritten at a different turn, a revoked signing key, a cascaded
+recomputation, a compliance rule that erases an identifier, a long-horizon cell
+state, and two sources that contradict each other at different trust levels.
+Accuracy counts only the current values; reporting a superseded one is counted
+separately, because "phi_2 = 2.80 (was 2.50)" is a correct answer that mentions
+an old figure.
+
+### First run: the control collapsed, and it was our fault
+
+Memory scored 67 % against the control's 0 %, which was a lie in our favour.
+`stop_reason: refusal` — the first chain was written in synthesis terms
+("exothermic shift, reduce the reagent, correct the pH") and the model declined
+from turn 8 onward. The refusal then sat in the accumulating arm's history and
+silenced every later turn, while the memory arm, which keeps no history, was
+untouched. The chain tests overwriting of figures, not chemistry, so the same
+three values are now loop calibration parameters. The stand counts refusals and
+prints which turns produced them; a residual 2 of 42 still come from the
+trust-conflict chain.
+
+### Second run: the memory arm lost
+
+| | memory L0 | full context |
+|---|---|---|
+| tokens per turn | 6,777 | **3,913** |
+| slope | −6 | +189 |
+| accuracy on overwritten state | 4/6 (67 %) | **5/6 (83 %)** |
+| reported a superseded fact | **3/6 (50 %)** | 0/6 (0 %) |
+
+The prediction that a full-context agent would lose the thread did not hold at
+40 turns: it never once reported a stale value. The memory arm did, in half its
+answers, and the mechanism is plain — **the index had no arrow of time.** A
+cosine does not know that a fact was revoked, so the search returned the turn-1
+note and the turn-8 note with comparable scores and the model merged them.
+
+The token result is just as instructive. A fact is one line, so the control's
+context grows by 189 tokens per turn rather than 2,170, and paying 2.8 model
+calls per turn to avoid that is a loss. **What the memory buys is set by the
+volume of what must be remembered, not by the length of the session.**
+
+### The arrow of time, added
+
+Two mechanisms, both in the search layer — the C kernel returns Hamming
+distance, ranking policy belongs above it:
+
+**Decay.** `score *= exp(-dt / tau)`, dt in turns, tau 12 by default, measured
+from the most recent write rather than from the current turn. The first attempt
+measured from the current turn and was wrong: only notes carry timestamps, so
+only notes were penalised, and background corpus fragments at 0.38 displaced all
+three notes out of the top 5.
+
+**Entity tombstoning.** `write_observation` takes an `entity` key; writing the
+same key again marks the previous note deprecated and multiplies its weight by
+0.1, and the tool's reply says plainly what was superseded.
+
+Measured on the calibration chain: the current note ranks first at 0.789, the
+superseded note is out of the top 5 entirely.
+
+### Reconsolidation was inert, and now is not
+
+`non-unitarity 0.00e+00` after 18 writes was not perfect stability. The target
+passed to the engine was the note itself, and a target equal to the operator's
+own output cannot move it at any learning rate — a Hermitian rank-one
+perturbation of a unitary matrix has that same matrix as its unitary polar
+factor. The engine was running and learning nothing.
+
+The target is now the state-error vector dE = x_new − x_old between successive
+notes under the same entity key, normalised; the first write of a key has no
+divergence and applies no update. Oja's rule carries it, Newton-Schulz projects
+back.
+
+| | measured | threshold |
+|---|---|---|
+| non-unitarity | 1.88e-06 | < 1e-05 |
+| plasticity per update | 1.57e-02 | — |
+
+Plasticity is per single update and the engine clips `||dW||_F <= 0.05`, so the
+0.05 figure is reached over three to four updates rather than one.
 
 ## 6. Two defects found in this stand, and fixed
 

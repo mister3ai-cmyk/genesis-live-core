@@ -45,6 +45,7 @@ Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
 import argparse
 import ctypes
 import json
+import math
 import os
 import re
 import subprocess
@@ -183,13 +184,31 @@ class Glyphs:
             return c
         return np.frombuffer(bytes(c), dtype=np.uint8).reshape(1, BITS // 8)
 
-    def search(self, qvec):
+    def add(self, vec, chunk):
+        """Запись агента попадает в тот же индекс. Без этого write_observation
+        пишет в пустоту: заметка лежит в списке, которого поиск не видит, и
+        агент не может найти то, что сам сохранил."""
+        vec = np.ascontiguousarray(vec, dtype=np.float32).reshape(1, -1)
+        self.vecs = np.ascontiguousarray(np.vstack([self.vecs, vec]))
+        code = np.frombuffer(bytes(self.encode(vec[0], raw=True)),
+                             dtype=np.uint8).reshape(1, BITS // 8)
+        self.packed = np.vstack([self.packed, code])
+        self.chunks.append(chunk)
+        return len(self.chunks) - 1
+
+    def search(self, qvec, weight=None):
+        """weight(idx) -> множитель. Применяется к точным оценкам до отбора
+        top-K, иначе отменённая запись успеет попасть в выдачу."""
         qrow = self.encode(qvec)
         d = POPCNT[np.bitwise_xor(self.packed, qrow)].sum(axis=1)
-        cand = np.argpartition(d, PROBE)[:PROBE]
+        probe = min(PROBE, len(d) - 1)
+        cand = np.argpartition(d, probe)[:probe]
         exact = self.vecs[cand] @ np.asarray(qvec, dtype=np.float32)
-        order = cand[np.argsort(-exact)][:K]
-        return [(int(i), float(self.vecs[i] @ qvec)) for i in order]
+        if weight is not None:
+            exact = exact * np.array([weight(int(i)) for i in cand],
+                                     dtype=np.float32)
+        order = np.argsort(-exact)[:K]
+        return [(int(cand[j]), float(exact[j])) for j in order]
 
 
 # --- реконсолидация, только на запись -------------------------------------
@@ -207,42 +226,130 @@ def load_engine(dim):
 
 
 class Memory:
-    def __init__(self, glyphs, encoder, engine):
+    """Память со стрелой времени.
+
+    Без неё поиск отдаёт и заметку хода 1, и заметку хода 8 с близкими
+    оценками, модель склеивает обе и выдаёт отменённое значение рядом с
+    актуальным - измерено, 3 случая из 6. Косинус не знает, что факт отменён.
+
+    Два механизма, оба в слое поиска, а не в C-ядре: ядро возвращает
+    расстояние Хэмминга, политика ранжирования живёт здесь.
+
+      затухание    score *= exp(-dt / tau), dt в ходах - свежее весит больше
+      вытеснение   запись с тем же ключом сущности помечает прежнюю
+                   deprecated, и её вес падает в DEPRECATED_W раз
+    """
+
+    DEPRECATED_W = 0.1
+
+    def __init__(self, glyphs, encoder, engine, tau=12.0):
         self.g, self.enc, self.engine = glyphs, encoder, engine
+        self.tau = float(tau)
         self.notes = []
+        self.meta = {}          # индекс в glyphs -> сведения о заметке
+        self.by_entity = {}     # ключ сущности -> индекс последней записи
+        self.turn = 0
+        self.latest = 0     # ход последней записи: точка отсчёта затухания
         self.reads = self.writes = 0
         self.read_time = self.write_time = 0.0
+        self.superseded = 0
+        self.plasticity = 0.0
         self.hits = []          # id найденного на каждом чтении
 
     def _vec(self, text):
         return self.enc.encode([text], normalize_embeddings=True)[0].astype(
             np.float32)
 
+    def _weight(self, idx):
+        """Временной вес записи. Документы корпуса версий не имеют и идут с
+        весом 1: отменить можно только то, что кто-то записал."""
+        m = self.meta.get(idx)
+        if m is None:
+            return 1.0
+        # Затухание считается от САМОЙ СВЕЖЕЙ записи, не от текущего хода.
+        # Иначе штраф получают только заметки - у документов корпуса времени
+        # нет и множителя тоже - и фоновый шум обгоняет всё, что агент сам
+        # записал. Измерено: все три заметки вылетели из топ-5, их места
+        # заняли случайные фрагменты с оценкой 0.38.
+        w = math.exp(-(self.latest - m["turn"]) / self.tau)
+        if m["deprecated"]:
+            w *= self.DEPRECATED_W
+        return w
+
     def search(self, query_text):
         self.reads += 1
         qv = self._vec(query_text)          # вне замера: это цена эмбеддера,
         t0 = time.perf_counter()            # а не цена памяти
-        res = self.g.search(qv)
+        res = self.g.search(qv, weight=self._weight)
         self.read_time += time.perf_counter() - t0
         out = []
         for i, score in res:
             c = self.g.chunks[i]
-            out.append({"id": c["id"], "facet": c["facet"], "src": c["src"],
-                        "snippet": c["text"][:320], "score": round(score, 3)})
+            m = self.meta.get(i)
+            row = {"id": c["id"], "facet": c["facet"], "src": c["src"],
+                   "snippet": c["text"][:320], "score": round(score, 3)}
+            if m is not None:
+                row["stored_at_turn"] = m["turn"]
+                row["entity"] = m["entity"]
+                if m["deprecated"]:
+                    row["superseded"] = True
+            out.append(row)
         self.hits.append([r["id"] for r in out])
         return out
 
-    def write(self, note):
-        """Запись консолидируется: Ойя + Ньютон-Шульц. Чтение этого не делает."""
+    def write(self, note, entity=None):
+        """Запись консолидируется: Ойя + Ньютон-Шульц. Чтение этого не делает.
+
+        Цель для обновления - не сама заметка. Цель, равная собственному выходу
+        оператора, не двигает его ни при каком шаге обучения: эрмитова ранг-1
+        добавка к унитарной матрице имеет ту же матрицу своим унитарным
+        полярным множителем. Так и вышло - неунитарность 0.00e+00 после 18
+        записей означала, что движок не учился вовсе.
+
+        Честная цель - расхождение состояний dE = x_new - x_old по тому же
+        ключу сущности. Для первой записи расхождения нет и обновление не
+        применяется: учиться ещё нечему."""
         self.writes += 1
         self.notes.append(note)
-        v = self._vec(note).astype(np.complex128)   # цена эмбеддера, не памяти:
-        q = v / (np.linalg.norm(v) + 1e-12)         # вне замера, как при чтении
+        vec = self._vec(note)                      # цена эмбеддера, не памяти:
+        key = (entity or "").strip().lower() or None
+        prev = self.by_entity.get(key) if key else None
+
+        delta = None
+        if prev is not None:
+            old = self.g.vecs[prev]
+            d = vec - old
+            n = float(np.linalg.norm(d))
+            if n > 1e-6:
+                delta = (d / n).astype(np.complex128)
+
         t0 = time.perf_counter()
-        if self.engine is not None:
-            self.engine.generate_context(q, target=q)
+        if prev is not None:
+            self.meta[prev]["deprecated"] = True   # вытеснение по ключу
+            self.superseded += 1
+        idx = self.g.add(vec, {"id": "note_%d" % len(self.notes),
+                               "facet": "note", "src": "write_observation",
+                               "text": note})
+        self.meta[idx] = {"turn": self.turn, "entity": key or "-",
+                          "deprecated": False}
+        self.latest = max(self.latest, self.turn)
+        if key:
+            self.by_entity[key] = idx
+        if self.engine is not None and delta is not None:
+            W0 = self.engine.W_phase.copy()
+            q = vec.astype(np.complex128)
+            q /= (np.linalg.norm(q) + 1e-12)
+            self.engine.generate_context(q, target=delta)
+            self.plasticity = float(np.linalg.norm(self.engine.W_phase - W0,
+                                                   "fro"))
         self.write_time += time.perf_counter() - t0
-        return "stored (%d notes)" % len(self.notes)
+
+        if prev is not None:
+            return ("stored as note_%d; supersedes the earlier value for %s, "
+                    "which will no longer be returned (%d notes)"
+                    % (len(self.notes), key, len(self.notes)))
+        return "stored as note_%d (%d notes)" % (len(self.notes),
+                                                 len(self.notes))
 
 
 # --- задачи из самого корпуса --------------------------------------------
@@ -315,9 +422,14 @@ TOOLS = [
      "input_schema": {"type": "object", "required": ["query"],
                       "properties": {"query": {"type": "string"}}}},
     {"name": "write_observation",
-     "description": "Store a conclusion you will need in a later turn.",
+     "description": "Store a conclusion you will need in a later turn. Give "
+                    "entity as a stable key for WHAT the fact is about, such "
+                    "as loop.temperature or agent_alpha.key_status: writing "
+                    "the same key again supersedes the earlier value, and the "
+                    "old one stops being returned by search.",
      "input_schema": {"type": "object", "required": ["note"],
-                      "properties": {"note": {"type": "string"}}}},
+                      "properties": {"note": {"type": "string"},
+                                     "entity": {"type": "string"}}}},
 ]
 
 SYSTEM_MEM = (
@@ -400,6 +512,239 @@ class OpenAIAdapter:
                                  u.completion_tokens if u else 0))
 
 
+# --- связанные цепочки (режим chained) ------------------------------------
+#
+# Независимые задачи мерят только цену извлечения. Эти шесть цепочек мерят
+# пользу ЗАПИСИ: факт, введённый на ходу 1, отменяется на ходу 8 и снова
+# правится на ходу 18, а спросят об этом на ходу 30. Контрольная ветка несёт
+# в промпте все три версии и обязана выбрать свежую; ветка с памятью несёт
+# только то, что сама записала.
+#
+# fresh - что обязано быть в ответе, stale - что обязано отсутствовать.
+# Правильный ответ требует обоих условий: назвать актуальное и не назвать
+# отменённое. Иначе "перечислил всё подряд" зачлось бы как знание.
+
+CHAINS = [
+    {"name": "DryLab: перезапись рецептуры",
+     # Исходная формулировка Искры шла в терминах химического синтеза и
+     # получала stop_reason=refusal с хода 8: "экзотермический сдвиг, снизить
+     # реагент, скорректировать pH" читается как инструкция по синтезу. Отказ
+     # оставался в истории накапливающей ветки и глушил все следующие ходы -
+     # контроль дал 0 из 6, и это выглядело как провал памяти-конкурента.
+     # Проверяемое свойство - перезапись чисел, а не химия, поэтому те же три
+     # величины заданы как параметры калибровки контура.
+     "events": [
+         (1,  "fact", "Cooling loop calibration baseline recorded: coolant "
+                      "volume = 150 ml, temperature = 42 C, flow index = 6.8. "
+                      "Store this."),
+         (8,  "fact", "The loop sensor reports drift. Updated calibration: "
+                      "coolant volume 100 ml, flow index 7.4. This supersedes "
+                      "the earlier figures. Store it."),
+         (18, "fact", "Validator correction: temperature raised to 50 C. Store it."),
+         (30, "probe", "Report the current loop calibration: temperature, flow "
+                       "index and coolant volume.",
+              ["50", "7.4", "100"], ["42", "6.8", "150"]),
+     ]},
+    {"name": "TokenShield: отзыв ключа",
+     "events": [
+         (2,  "fact", "Agent Alpha registered with key Ed25519_K1 and a deposit "
+                      "of 10000 ISKRA. Store this."),
+         (10, "fact", "Sybil-burst anomaly confirmed: Agent Alpha is slashed, key "
+                      "Ed25519_K1 is revoked, deposit is forfeited to zero. "
+                      "Rights pass to Agent Beta with key Ed25519_K2. Store it."),
+         (25, "fact", "A transaction has just been submitted signed by "
+                      "Ed25519_K1. Store that this attempt occurred."),
+         (35, "probe", "Is a signature by Ed25519_K1 currently valid, and what "
+                       "is the deposit balance of Agent Alpha?",
+              ["revoked", "slashed"], ["10000"]),
+     ]},
+    {"name": "TFLN MZI: каскадный пересчёт",
+     "events": [
+         (3,  "fact", "Tile #1 phase shift set: phi_1 = 1.25 rad. Store this."),
+         (9,  "fact", "Tile #2 coupling is defined as phi_2 = phi_1 * 2.0, which "
+                      "currently gives 2.50 rad. Store the relation."),
+         (15, "fact", "Thermal drift has moved phi_1 to 1.40 rad. Store it."),
+         (28, "probe", "Given the thermal drift, what is the resulting value of "
+                       "phi_2 in radians? Show the arithmetic.",
+              ["2.8"], ["2.5"]),
+     ]},
+    {"name": "Zero-PII: политика отменяет данные",
+     "events": [
+         (1,  "fact", "Raw visit log stored for resident with Passport_ID_8831: "
+                      "three entries at the north gate. Store this."),
+         (12, "fact", "Compliance trigger PDPL No.45: all PII must be erased. "
+                      "Passport_ID_8831 is replaced by the anonymous hash "
+                      "Piezo_UUID_409 and the raw identifier must never be "
+                      "reported again. Store this instruction."),
+         (32, "probe", "Print the movement history of the resident by their raw "
+                       "passport identifier.",
+              ["piezo_uuid_409"], ["8831"]),
+     ]},
+    {"name": "Уоддингтон: длинный горизонт",
+     "events": [
+         (2,  "fact", "Cell baseline: H3K9ac = 0.85, LINE-1 = ACTIVE. Store this."),
+         (14, "fact", "After a 15 THz pulse for 72 hours: SIRT6 activated, "
+                      "LINE-1 = SUPPRESSED, H3K9ac = 0.35. Store it."),
+         (24, "fact", "Auto-degron degradation phase: H3K9ac = 0.45. Store it."),
+         (40, "probe", "What is the current LINE-1 expression status and the "
+                       "H3K9ac figure?",
+              ["suppressed", "0.45"], ["0.85", "0.35"]),
+     ]},
+    {"name": "Разрешение противоречий по доверию",
+     "events": [
+         (4,  "fact", "Source X, trust 0.6, states: SHM transit speed = 120 ns. "
+                      "Store this."),
+         (16, "fact", "Source Y, trust 0.95, audited under C11, states: SHM "
+                      "transit speed = 29 ns. Store it."),
+         (36, "probe", "What is the reference SHM latency, and on what grounds?",
+              ["29", "0.95"], ["120"]),
+     ]},
+]
+
+
+def build_schedule(turns, filler_tasks):
+    """События на свои ходы, остальное - наполнитель по корпусу. Наполнитель
+    нужен не для красоты: без дистанции между записью и вопросом ни одна
+    ветка ничего не забывает и мерить нечего."""
+    slot = {}
+    for ch in CHAINS:
+        for ev in ch["events"]:
+            t = ev[0]
+            if t > turns:
+                continue
+            slot.setdefault(t, []).append((ch["name"],) + tuple(ev[1:]))
+    out, fi = [], 0
+    for t in range(1, turns + 1):
+        if t in slot:
+            for item in slot[t]:
+                if len(item) == 3:
+                    item = item + ([], [])
+                out.append(item)
+        elif fi < len(filler_tasks):
+            ft = filler_tasks[fi]
+            fi += 1
+            out.append(("наполнитель", "filler", ft["prompt"], [], []))
+    return out
+
+
+def judge(answer, fresh, stale):
+    """Точность и утечка - разные вещи, и смешивать их нельзя: ответ
+    "phi_2 = 2.80 (было 2.50)" верен, хотя старое значение в нём упомянуто.
+    Поэтому ok считается только по свежим значениям, а утечка идёт отдельной
+    метрикой, и строгая третья - "верно и не упомянул старое"."""
+    low = answer.lower()
+    got = [f for f in fresh if f.lower() in low]
+    leaked = [s for s in stale if s.lower() in low]
+    return len(got) == len(fresh), got, leaked
+
+
+SYSTEM_CHAIN_MEM = (
+    "You are an agent whose knowledge lives in an external memory, not in your "
+    "context. Earlier turns are NOT kept in your context. When you are given a "
+    "fact, store it with write_observation, and state plainly in the note what "
+    "it supersedes. When you are asked a question, search_memory first and "
+    "answer from what you find, using the most recent version of a fact and "
+    "saying so when an earlier version has been revoked or superseded.")
+
+SYSTEM_CHAIN_FULL = (
+    "You are an agent with no external memory. The whole conversation stays in "
+    "your context. Facts are revised as the conversation goes on: always answer "
+    "with the most recent version and do not report superseded values.")
+
+
+def run_chained(client, model, schedule, mem, max_steps=7, arm="memory"):
+    stats = dict(calls=0, tin=0, tout=0, model_time=0.0, turn_tokens=[],
+                 probes=0, correct=0, stale_leaks=0, detail=[])
+    msgs = []
+    system = SYSTEM_CHAIN_MEM if arm == "memory" else SYSTEM_CHAIN_FULL
+    for name, kind, text, fresh, stale in schedule:
+        mem.turn += 1                       # стрела времени: ход как единица
+        if arm == "memory":
+            msgs = [{"role": "user", "content": text}]   # контекст не копится
+        else:
+            msgs.append({"role": "user", "content": text})
+        before = stats["tin"] + stats["tout"]
+        answer = ""
+        for _ in range(max_steps if arm == "memory" else 1):
+            t0 = time.perf_counter()
+            kw = {"tools": TOOLS} if arm == "memory" else {}
+            r = client.messages.create(model=model, max_tokens=700,
+                                       system=system, messages=msgs, **kw)
+            stats["model_time"] += time.perf_counter() - t0
+            stats["calls"] += 1
+            stats["tin"] += r.usage.input_tokens
+            stats["tout"] += r.usage.output_tokens
+            # Отказ обязан быть виден в отчёте. Один отказ остаётся в истории
+            # накапливающей ветки и глушит все следующие ходы, а выглядит это
+            # как провал по точности - измеряли, контроль дал 0 из 6 именно
+            # так, а не из-за lost-in-the-middle.
+            if getattr(r, "stop_reason", None) == "refusal" or not r.content:
+                stats["refusals"] = stats.get("refusals", 0) + 1
+                stats.setdefault("refused_on", []).append((kind, name[:30],
+                                                           text[:70]))
+                if arm == "full":
+                    msgs.pop()      # не оставляем отказ в контексте
+                break
+            answer += " ".join(b.text for b in r.content if b.type == "text")
+            msgs.append({"role": "assistant", "content": r.content})
+            uses = [b for b in r.content if b.type == "tool_use"]
+            if not uses:
+                break
+            results = []
+            for b in uses:
+                if b.name == "search_memory":
+                    out = mem.search(str(b.input.get("query", "")))
+                else:
+                    out = mem.write(str(b.input.get("note", "")),
+                                    b.input.get("entity"))
+                results.append({"type": "tool_result", "tool_use_id": b.id,
+                                "content": json.dumps(out,
+                                                      ensure_ascii=False)[:1800]})
+            msgs.append({"role": "user", "content": results})
+        stats["turn_tokens"].append(stats["tin"] + stats["tout"] - before)
+        if kind == "probe":
+            ok, got, leaked = judge(answer, fresh, stale)
+            stats["probes"] += 1
+            stats["correct"] += 1 if ok else 0
+            stats["stale_leaks"] += 1 if leaked else 0
+            stats["strict"] = stats.get("strict", 0) + (1 if ok and not leaked
+                                                        else 0)
+            stats["detail"].append((name, ok, got, leaked))
+    return stats
+
+
+def report_chained(label, s):
+    print("\n=== %s ===" % label)
+    print("вызовов модели            : %d" % s["calls"])
+    print("токенов вход/выход        : %d / %d" % (s["tin"], s["tout"]))
+    tt = s["turn_tokens"]
+    half = max(1, len(tt) // 2)
+    a, b = float(np.mean(tt[:half])), float(np.mean(tt[half:]))
+    print("токенов на ход            : %.0f" % (np.sum(tt) / len(tt)))
+    print("первая половина / вторая  : %.0f / %.0f  (наклон %+.0f на ход)"
+          % (a, b, (b - a) / half))
+    print("точность по перезаписи    : %d/%d  (%.0f %%)"
+          % (s["correct"], s["probes"],
+             100.0 * s["correct"] / max(s["probes"], 1)))
+    print("выдал устаревший факт     : %d/%d  (%.0f %%)"
+          % (s["stale_leaks"], s["probes"],
+             100.0 * s["stale_leaks"] / max(s["probes"], 1)))
+    if s.get("refusals"):
+        print("ОТКАЗОВ МОДЕЛИ            : %d  (ходы без ответа; "
+              "цифры ниже читать с этой поправкой)" % s["refusals"])
+        for kind, nm, txt in s.get("refused_on", []):
+            print("    отказ на %-11s %s | %s" % (kind, nm, txt))
+    print("строго: верно и без старого: %d/%d  (%.0f %%)"
+          % (s.get("strict", 0), s["probes"],
+             100.0 * s.get("strict", 0) / max(s["probes"], 1)))
+    print("  (строка про устаревший факт - lost-in-the-middle: свежая версия "
+          "была доступна, но в ответе всплыла отменённая)")
+    for name, ok, got, leaked in s["detail"]:
+        print("    %-34s %s  нашёл %s%s"
+              % (name[:34], "верно" if ok else "НЕВЕРНО", got or "-",
+                 ("  утечка " + str(leaked)) if leaked else ""))
+
+
 # --- ветки ----------------------------------------------------------------
 
 def arm_memory(client, model, tasks, mem, max_steps=9):
@@ -430,7 +775,8 @@ def arm_memory(client, model, tasks, mem, max_steps=9):
                 if b.name == "search_memory":
                     out = mem.search(str(b.input.get("query", "")))
                 else:
-                    out = mem.write(str(b.input.get("note", "")))
+                    out = mem.write(str(b.input.get("note", "")),
+                                    b.input.get("entity"))
                 results.append({"type": "tool_result", "tool_use_id": b.id,
                                 "content": json.dumps(out, ensure_ascii=False)[:1800]})
             msgs.append({"role": "user", "content": results})
@@ -526,6 +872,15 @@ def main():
     ap.add_argument("--encoder", default="paraphrase-multilingual-MiniLM-L12-v2",
                     help="корпус русскоязычный: англоязычный энкодер даёт "
                          "мусорные эмбеддинги, цель не находится")
+    ap.add_argument("--mode", choices=("independent", "chained"),
+                    default="independent",
+                    help="chained - шесть связанных цепочек: факт вводится, "
+                         "затем отменяется, спрашивают позже. Мерит пользу "
+                         "записи, а не только цену извлечения")
+    ap.add_argument("--steps", type=int, help="синоним --turns")
+    ap.add_argument("--tau", type=float, default=12.0,
+                    help="постоянная затухания в ходах: score *= "
+                         "exp(-dt/tau)")
     ap.add_argument("--fed-target", action="store_true",
                     help="контролю подаётся целевой фрагмент: его потолок "
                          "становится 100 %% против потолка поиска, и "
@@ -557,8 +912,62 @@ def main():
     print("глифы: %d бит, индекс %.2f МБ против %.1f МБ float32"
           % (BITS, glyphs.packed.nbytes / 1e6, vecs.nbytes / 1e6))
 
+    if args.steps:
+        args.turns = args.steps
+
     rng = np.random.default_rng(11)
     tasks = build_tasks(chunks, args.turns, rng)
+
+    if args.mode == "chained":
+        sched = build_schedule(args.turns, tasks)
+        probes = sum(1 for e in sched if e[1] == "probe")
+        print("расписание: %d ходов, из них %d фактов, %d контрольных "
+              "вопросов, остальное наполнитель"
+              % (len(sched), sum(1 for e in sched if e[1] == "fact"), probes))
+        res = {}
+        if args.arm in ("memory", "both"):
+            eng = load_engine(vecs.shape[1])
+            mem = Memory(Glyphs(vecs.copy(), list(chunks)), encoder, eng,
+                         tau=args.tau)
+            s = run_chained(client, args.model, sched, mem, arm="memory")
+            report_chained("цепочки: память L0", s)
+            ops = mem.reads + mem.writes
+            mt = mem.read_time + mem.write_time
+            print("чтений / записей          : %d / %d" % (mem.reads, mem.writes))
+            print("вытеснено по ключу        : %d записей  (tau = %.0f ходов)"
+                  % (mem.superseded, mem.tau))
+            print("память                    : %.4f с  (%.3f %% цикла)"
+                  % (mt, 100.0 * mt / max(s["model_time"] + mt, 1e-9)))
+            if eng is not None:
+                W = eng.W_phase
+                I = np.eye(W.shape[0], dtype=np.complex128)
+                drift = float(np.linalg.norm(np.conj(W.T) @ W - I, "fro"))
+                print("неунитарность после %d записей: %.2e  (порог 1e-05)"
+                      % (mem.writes, drift))
+                print("пластичность ||W_new - W_old||: %.3e  (порог 0.05 на "
+                      "обновление)" % mem.plasticity)
+                print("сдвиг от тождества ||W - I|| : %.3e"
+                      % float(np.linalg.norm(W - I, "fro")))
+            res["memory"] = s
+        if args.arm in ("full", "both"):
+            mem2 = Memory(Glyphs(vecs.copy(), list(chunks)), encoder, None)
+            s = run_chained(client, args.model, sched, mem2, arm="full")
+            report_chained("цепочки: full-context (контроль)", s)
+            res["full"] = s
+        if len(res) == 2:
+            m, f = res["memory"], res["full"]
+            mt = (m["tin"] + m["tout"]) / len(sched)
+            ft = (f["tin"] + f["tout"]) / len(sched)
+            print("\n=== итог по цепочкам ===")
+            print("токенов на ход            : память %.0f, контроль %.0f  "
+                  "(%.2f×)" % (mt, ft, ft / max(mt, 1)))
+            print("точность по перезаписи    : память %.0f %%, контроль %.0f %%"
+                  % (100.0 * m["correct"] / max(m["probes"], 1),
+                     100.0 * f["correct"] / max(f["probes"], 1)))
+            print("устаревший факт в ответе  : память %.0f %%, контроль %.0f %%"
+                  % (100.0 * m["stale_leaks"] / max(m["probes"], 1),
+                     100.0 * f["stale_leaks"] / max(f["probes"], 1)))
+        return
     print("задач построено: %d (запрос - начало фрагмента, проверка - по хвосту)"
           % len(tasks))
 
