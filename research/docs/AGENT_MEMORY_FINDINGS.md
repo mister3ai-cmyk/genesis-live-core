@@ -76,7 +76,43 @@ Write fraction is 21 %, well past the 5 % crossover measured in
 `benchmarks/mixed_workload.py`, which is where a flat scan beats a graph index
 under mixed load.
 
-## 4. Two defects found in this stand, and fixed
+## 4. The saving is a property of the pair, not of the memory
+
+The same memory arm, the same 40 tasks, on Grok 4.6:
+
+| | Haiku 5.5 | Grok 4.6 |
+|---|---|---|
+| tokens per turn | 16,318 | **45,141** |
+| reads per turn | 3.7 | **14.8** |
+| writes | 39 | **0** |
+| model calls per turn | 4.5 | 7.3 |
+| accuracy | 40 % | 20 % |
+| memory share of loop | 0.354 % | 0.042 % |
+
+Grok searches four times as often and never writes, so its prompt fills with
+retrieval results inside a single turn and the saving disappears — 45,141 tokens
+per turn is the full-context arm's figure. **A 2.86× saving is a property of the
+model-and-memory pair, not of the memory**, and quoting it without naming the
+model would be the same error as quoting a benchmark without naming the host.
+
+The zero writes are not an adapter fault: driven directly, Grok calls
+`write_observation` correctly on the first opportunity. They are a fault in the
+task set — see below.
+
+## 5. A third defect, in the task set, not yet fixed
+
+The 40 tasks are independent of one another. Nothing in turn 12 needs anything
+from turn 3, so `write_observation` has no work to do: Haiku wrote 39 notes
+because it was told to, Grok wrote none because nothing required it. The 21 %
+write fraction is therefore an artefact of one model's disposition and should
+not be read against the 5 % crossover in `benchmarks/mixed_workload.py`.
+
+The architecture's own case is a swarm accumulating closed context over a
+session, which means **chained tasks** where later turns depend on earlier
+findings. Until the task set has chains, this stand measures retrieval traffic
+and context cost honestly, and measures the value of writing not at all.
+
+## 6. Two defects found in this stand, and fixed
 
 **The search ignored the query.** The first version hashed the query text to a
 random corpus index, so the agent was reacting to a broken tool. Every figure
@@ -94,12 +130,12 @@ target was found 2 times in 16. Chunking by character count cut words in half
 and the resulting fragments matched nothing. Both were corrected before any
 figure above was taken.
 
-## 5. The retrieval ceiling, stated
+## 7. The retrieval ceiling, stated
 
 14 of 40 targets are reachable by a single query. Both arms are bounded by it,
 so the accuracy figures are not to be read against 100 %.
 
-## 6. Reproducing
+## 8. Reproducing
 
 ```bash
 python3 research/agent_memory_traffic.py --arm both --turns 40
