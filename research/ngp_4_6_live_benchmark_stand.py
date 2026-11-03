@@ -5,14 +5,20 @@ Zenodo DOI: 10.5281/zenodo.23099491
 Repository: genesis-live-core
 """
 import math
-import time
+import os
 import statistics
+import time
 
 ZENODO_DOI = "10.5281/zenodo.23099491"
 
 def _pass(name, value, detail=""):
     tag = f"  detail: {detail}" if detail else ""
     print(f"[OK]  {name}: {value}{tag}")
+
+def _skip(name, why):
+    print(f"[SKIP] {name}: {why}")
+    raise LookupError(name)
+
 
 def _fail(name, value, expected):
     print(f"[FAIL] {name}: got {value}, expected {expected}")
@@ -71,30 +77,84 @@ def bench_miles_fleischmann():
 # ── HARDWARE ─────────────────────────────────────────────────────────────────
 
 def bench_posix_shm_latency():
-    """Simulate /dev/shm ring-buffer latency via time.perf_counter_ns."""
-    import os, tempfile
-    samples = []
-    payload = b"\x00" * 64  # 64-byte aligned cache line
+    """Передача через /dev/shm, измеренная C-харнессом, а не питоном.
 
-    tmp = tempfile.NamedTemporaryFile(dir="/dev/shm" if os.path.exists("/dev/shm")
-                                     else tempfile.gettempdir(), delete=False)
-    tmp.write(payload)
-    tmp.flush()
-    name = tmp.name
-    tmp.close()
+    Прежняя версия открывала файл, читала 64 байта и закрывала его — тысячу раз,
+    то есть три системных вызова на итерацию. Она выдавала p99 около 127 мкс и
+    печатала [FAIL] против SLA в 1.7 мкс. Это была цена питоновского файлового
+    ввода-вывода, а не кольца в разделяемой памяти: настоящий почтовый ящик на
+    atomic-загрузках даёт 30 нс p50. Симуляция, помеченная как замер, хуже
+    отсутствия замера — она даёт ложный отрицательный результат.
+    """
+    import re
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    binary = os.path.join(root, "benchmarks", "run_benchmark")
+    if not os.path.exists(binary):
+        subprocess.run(["make", "-s", "-C", os.path.join(root, "benchmarks")],
+                       check=False)
+    if not os.path.exists(binary):
+        _skip("p99_shm_latency", "benchmarks/run_benchmark не собран: "
+                                 "cd benchmarks && make")
+        return
+    out = subprocess.run([binary], capture_output=True, text=True, timeout=600).stdout
+    block = out.split("SHM Handoff", 1)
+    if len(block) < 2:
+        _skip("p99_shm_latency", "в выводе харнесса нет секции SHM Handoff")
+        return
+    found = dict(re.findall(r"(p50|p99|p99\.9):\s+(\d+)\s+ns", block[1][:400]))
+    if "p99" not in found:
+        _skip("p99_shm_latency", "не распарсились значения задержки")
+        return
+    p99_us = int(found["p99"]) / 1000.0
+    if p99_us >= 1.700:
+        _fail("p99_latency_us", "%.3f" % p99_us, "< 1.700")
+    _pass("p99_shm_latency", "%.3f us (SLA < 1.700 us)" % p99_us,
+          "p50=%s ns, p99=%s ns, p99.9=%s ns, замерено run_benchmark"
+          % (found.get("p50", "?"), found["p99"], found.get("p99.9", "?")))
 
-    for _ in range(1000):
-        t0 = time.perf_counter_ns()
-        with open(name, "rb") as f:
-            _ = f.read(64)
-        samples.append((time.perf_counter_ns() - t0) / 1000.0)
 
-    os.unlink(name)
-    p99 = sorted(samples)[int(len(samples) * 0.99)]
-    if p99 >= 1.700:
-        _fail("p99_latency_us", f"{p99:.3f}", "< 1.700")
-    _pass("p99_shm_latency", f"{p99:.3f} us (SLA < 1.700 us)",
-          f"median={statistics.median(samples):.3f} us")
+def bench_reconsolidation_plasticity():
+    """Оператор обязан двигаться при внешней цели и оставаться на многообразии.
+
+    Инвариант добавлен после того, как правило обновления оказалось тождеством:
+    ||W - I|| = 5.4e-17 после двух тысяч обновлений, и восемьдесят зелёных
+    тестов этого не заметили.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        _skip("reconsolidation_plasticity", "нужен numpy")
+        return
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "modules", "ngp46_reconsolidation_engine.py")
+    if not os.path.exists(path):
+        _skip("reconsolidation_plasticity", "модуль не найден")
+        return
+    spec = importlib.util.spec_from_file_location("ngp46", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    dim = 64
+    eng = mod.NGP46ReconsolidationEngineHPC(
+        dim=dim, estimator=mod.HeuristicBurstEstimator())
+    rng = np.random.default_rng(7)
+    unit = lambda v: v / (np.linalg.norm(v) + 1e-12)
+    for _ in range(500):
+        q = unit(rng.standard_normal(dim) + 1j * rng.standard_normal(dim))
+        t = unit(rng.standard_normal(dim) + 1j * rng.standard_normal(dim))
+        eng.generate_context(q, target=t)
+    I = np.eye(dim, dtype=np.complex128)
+    moved = float(np.linalg.norm(eng.W_phase - I, "fro"))
+    drift = float(np.linalg.norm(np.conj(eng.W_phase.T) @ eng.W_phase - I, "fro"))
+    if moved <= 0.05:
+        _fail("reconsolidation_plasticity", "%.3e" % moved, "> 5.0e-02")
+    if drift >= 1.0e-04:
+        _fail("reconsolidation_unitarity", "%.3e" % drift, "< 1.0e-04")
+    _pass("reconsolidation", "||W-I||=%.3f, неунитарность=%.1e" % (moved, drift),
+          "500 обновлений с внешней целью, dim=64")
+
 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 
@@ -105,24 +165,32 @@ def main():
     print("=" * 62)
 
     suites = [
-        ("LAYER I  — Compute & Graph Topology",   [bench_chebyshev, bench_grassmannian]),
-        ("LAYER II — Non-Hermitian Quantum Physics", [bench_hg201]),
-        ("LAYER III — Empirical Calorimetry & D(0)", [bench_deuterium_d0, bench_miles_fleischmann]),
-        ("HARDWARE — POSIX SHM IPC SLA",          [bench_posix_shm_latency]),
+        ("LAYER I — Compute & Graph Topology  [COMPUTED: величины считаются здесь]",
+         [bench_chebyshev, bench_grassmannian]),
+        ("LAYER II — Non-Hermitian Physics  [CONSTANTS: формулы против зашитых "
+         "ожидаемых значений, физика не измеряется]", [bench_hg201]),
+        ("LAYER III — Calorimetry & D(0)  [CONSTANTS: то же, проверка арифметики]",
+         [bench_deuterium_d0, bench_miles_fleischmann]),
+        ("HARDWARE — измерено на машине  [MEASURED]",
+         [bench_posix_shm_latency, bench_reconsolidation_plasticity]),
     ]
 
-    passed = failed = 0
+    passed = failed = skipped = 0
     for title, benches in suites:
         print(f"\n--- {title} ---")
         for fn in benches:
             try:
                 fn()
                 passed += 1
-            except AssertionError as e:
+            except AssertionError:
                 failed += 1
+            except LookupError:
+                skipped += 1
 
     print("\n" + "=" * 62)
-    print(f" RESULT: {passed} PASSED  |  {failed} FAILED")
+    print(f" RESULT: {passed} PASSED  |  {failed} FAILED  |  {skipped} SKIPPED")
+    print(" COMPUTED/MEASURED проверяют поведение; CONSTANTS сверяют формулы")
+    print(" с зашитыми значениями и физику не подтверждают.")
     print("=" * 62)
     return failed
 
