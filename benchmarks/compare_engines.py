@@ -146,8 +146,7 @@ def require(*modules):
     if missing:
         names = {"faiss": "faiss-cpu", "hnswlib": "hnswlib",
                  "pyarrow": "pyarrow", "numpy": "numpy"}
-        sys.exit("missing: %s
-  pip install %s"
+        sys.exit("missing: %s\n  pip install %s"
                  % (", ".join(missing),
                     " ".join(names.get(m, m) for m in missing)))
 
@@ -201,7 +200,10 @@ def main():
             return [out[i] for i in range(got)]
 
         g, p50, p99 = timed(q_genesis, queries)
-        rows.append(("genesis-l0 %db%s + re-rank" % (bits, " centered" if args.center else ""), build_genesis,
+        # Память: стадия 1 — коды, но точная переранжировка читает float-корпус,
+        # поэтому он обязан быть резидентным. Считать только коды нечестно.
+        rows.append(("genesis-l0 %db%s + re-rank" % (bits, " centered" if args.center else ""),
+                     build_genesis, db.nbytes + n * bits // 8,
                      n * bits // 8, p50, p99, recall(g, truth, K)))
 
         import faiss
@@ -222,6 +224,7 @@ def main():
 
         g, p50, p99 = timed(q_faiss_bin, queries)
         rows.append(("faiss IndexBinaryFlat %db, same codes" % bits, build_fb,
+                     db.nbytes + n * bits // 8,
                      n * bits // 8, p50, p99, recall(g, truth, K)))
 
     # --- faiss exact ----------------------------------------------------
@@ -235,7 +238,7 @@ def main():
         return list(idx[0])
 
     g, p50, p99 = timed(q_faiss_exact, queries)
-    rows.append(("faiss IndexFlatIP (exact)", build_fe, db.nbytes,
+    rows.append(("faiss IndexFlatIP (exact)", build_fe, db.nbytes, db.nbytes,
                  p50, p99, recall(g, truth, K)))
 
     # --- hnswlib --------------------------------------------------------
@@ -255,23 +258,25 @@ def main():
     g, p50, p99 = timed(q_hnsw, queries)
     # graph + full float32 vectors, as hnswlib keeps them
     rows.append(("hnswlib (M=16, ef=64)", build_h, db.nbytes + n * 16 * 4,
-                 p50, p99, recall(g, truth, K)))
+                 n * 16 * 4, p50, p99, recall(g, truth, K)))
 
     # --- report ---------------------------------------------------------
     print()
     print("%d vectors x %d dims, %d queries, k=%d, LSH pool=%d, single thread"
           % (n, dim, len(queries), K, args.pool))
     print("-" * 86)
-    print("%-36s %9s %9s %9s %9s %8s" %
-          ("engine", "build s", "index MiB", "p50 ms", "p99 ms", "recall"))
+    print("%-34s %8s %9s %9s %8s %8s %7s" %
+          ("engine", "build s", "resident", "hot", "p50 ms", "p99 ms", "recall"))
     print("-" * 86)
-    for name, b, size, p50, p99, rec in rows:
-        print("%-36s %9.1f %9.1f %9.3f %9.3f %7.1f%%"
-              % (name, b, size / 1048576, p50, p99, rec * 100))
+    for name, b, total, hot, p50, p99, rec in rows:
+        print("%-34s %8.1f %8.1f M %7.2f M %8.3f %8.3f %6.1f%%"
+              % (name, b, total / 1048576, hot / 1048576, p50, p99, rec * 100))
     print("-" * 86)
-    print("index MiB for hnswlib is the float32 vectors plus an estimate of the")
-    print("graph; for genesis-l0 and faiss-binary it is the codes alone, which is")
-    print("what has to stay resident.")
+    print("resident — всё, что обязано быть в памяти, чтобы выдать top-k:")
+    print("    genesis и faiss-binary = коды + float-корпус для переранжировки,")
+    print("    hnswlib = корпус + граф. Без корпуса вторая ступень невозможна.")
+    print("hot — структура, по которой идёт первый проход и которая должна")
+    print("    поместиться в кэш: коды против графа.")
 
 
 if __name__ == "__main__":

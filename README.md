@@ -345,17 +345,31 @@ one timing loop, single-threaded. Dataset as above: DBpedia entities, OpenAI
 `text-embedding-3-large` truncated to 512 dims and re-normalized, 100 held-out
 queries, k=10, LSH candidate pool 512.
 
-| engine | build | index | p50 | p99 | recall@10 |
-|---|---|---|---|---|---|
-| genesis-l0, 128-bit | 0.5 s | **0.5 MiB** | 0.236 ms | 0.481 ms | 67.9 % |
-| faiss `IndexBinaryFlat`, 128-bit, same codes | 0.0 s | 0.5 MiB | 0.479 ms | 40.9 ms | 67.9 % |
-| genesis-l0, 256-bit | 0.7 s | **1.0 MiB** | 0.261 ms | 0.649 ms | 89.4 % |
-| faiss `IndexBinaryFlat`, 256-bit, same codes | 0.0 s | 1.0 MiB | 0.501 ms | 1.381 ms | 89.4 % |
-| faiss `IndexFlatIP`, exact | 0.0 s | 64.9 MiB | 2.275 ms | 4.060 ms | 100 % |
-| **hnswlib**, M=16, ef=64 | 22.4 s | 66.9 MiB | 0.323 ms | 0.544 ms | **97.7 %** |
+| engine | build | resident | hot structure | p50 | p99 | recall@10 |
+|---|---|---|---|---|---|---|
+| genesis-l0, 128-bit | 0.5 s | 65.4 MiB | **0.51 MiB** | 0.198 ms | 0.334 ms | 67.9 % |
+| faiss `IndexBinaryFlat`, 128-bit, same codes | 0.0 s | 65.4 MiB | 0.51 MiB | 0.465 ms | 4.911 ms | 67.9 % |
+| genesis-l0, 256-bit | 0.8 s | 65.9 MiB | **1.01 MiB** | 0.322 ms | 0.598 ms | 89.4 % |
+| faiss `IndexBinaryFlat`, 256-bit, same codes | 0.0 s | 65.9 MiB | 1.01 MiB | 0.544 ms | 1.690 ms | 89.4 % |
+| faiss `IndexFlatIP`, exact | 0.1 s | 64.9 MiB | 64.91 MiB | 2.255 ms | 5.535 ms | 100 % |
+| **hnswlib**, M=16, ef=64 | 22.7 s | 66.9 MiB | 2.03 MiB | 0.344 ms | **0.520 ms** | **97.7 %** |
 
-*33,234 vectors, median of three runs, mean-centering on (`--center`), timed
-through ctypes, which adds 1-2 us per call to the genesis-l0 rows.*
+*33,234 vectors, mean-centering on, timed through ctypes. **Resident** is
+everything that must be in memory to return a top-k: for the cascade that is the
+codes **plus the float corpus**, because stage two re-ranks against the original
+vectors and cannot run without them. **Hot structure** is what stage one scans
+and what therefore wants to be in cache.*
+
+**On total memory the cascade has no advantage: 65.9 MiB against 66.9 MiB, a
+difference of 1.5 %.** An earlier version of this table compared the cascade's
+codes alone against hnswlib's full footprint and reported a 67x gap. That was
+wrong, and the figure is withdrawn. A 1 MiB index and 89.4 % recall are not
+available at the same time: the scan alone, with no re-rank and no corpus
+resident, retrieves a measured 0.149 recall against full-dimensional truth.
+
+What is smaller is the structure stage one walks: 1.01 MiB of codes against a
+2.03 MiB graph, a factor of two, which matters for cache residency rather than
+for RAM.
 
 **Latency is a wash here; recall is not.** Across three runs genesis-l0 at 256
 bits spanned 0.233-0.287 ms and hnswlib 0.254-0.359 ms - overlapping ranges on a
@@ -381,9 +395,8 @@ are used; the trend, not the individual figure, is the signal.
 
 What survives the comparison, and does so at every size:What survives the comparison, and does so at every size:
 
-* **Index size: 67x smaller.** 3.0 MiB against 201 MiB. This is a different class,
-  not an optimisation, and it is the only number here that no amount of tuning on
-  the other side erases cheaply.
+* **Hot structure 2x smaller.** 1.01 MiB of codes against a 2.03 MiB graph, both
+  sitting in front of the same 65 MiB of vectors. Cache residency, not RAM.
 * **Build: 43x faster, and streaming.** Encoding is O(1) per vector with no graph
   to maintain, so inserts cost nothing to amortise. HNSW pays for every insert.
 * **Faster than FAISS on identical codes**, by 1.4-2.2x. Same algorithm, same
@@ -427,7 +440,8 @@ the fast, inaccurate end of it.
 
 Two caveats in the other direction. The hnswlib build ran single-threaded; six
 threads would bring 90 s down to roughly 15 s. And hnswlib's footprint can be cut
-with its own quantization, which narrows the 67x. Neither was measured here.
+with its own quantization, which would cut its 65 MiB of vectors as well.
+Neither was measured here.
 
 ---
 
