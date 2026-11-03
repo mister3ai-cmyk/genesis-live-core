@@ -196,18 +196,32 @@ class Glyphs:
         self.chunks.append(chunk)
         return len(self.chunks) - 1
 
-    def search(self, qvec, weight=None):
-        """weight(idx) -> множитель. Применяется к точным оценкам до отбора
-        top-K, иначе отменённая запись успеет попасть в выдачу."""
+    def search(self, qvec, weight=None, slots=None, slot_quota=0):
+        """weight(idx) -> множитель, применяется к точным оценкам до отбора
+        top-K, иначе отменённая запись успеет попасть в выдачу.
+
+        slots - множество индексов, принадлежащих рабочей памяти; за ними
+        держится slot_quota мест, чтобы короткие записи не вытеснялись
+        длинными абзацами корпуса."""
         qrow = self.encode(qvec)
         d = POPCNT[np.bitwise_xor(self.packed, qrow)].sum(axis=1)
         probe = min(PROBE, len(d) - 1)
         cand = np.argpartition(d, probe)[:probe]
+        if slots:
+            # Рабочая память просматривается целиком: её десятки записей против
+            # тысяч документов, и терять их на стадии Hamming-отбора нельзя.
+            cand = np.unique(np.concatenate([cand, np.fromiter(slots, int)]))
         exact = self.vecs[cand] @ np.asarray(qvec, dtype=np.float32)
         if weight is not None:
             exact = exact * np.array([weight(int(i)) for i in cand],
                                      dtype=np.float32)
-        order = np.argsort(-exact)[:K]
+        order = list(np.argsort(-exact))
+        if slots and slot_quota:
+            own = [j for j in order if int(cand[j]) in slots]
+            rest = [j for j in order if int(cand[j]) not in slots]
+            order = own[:slot_quota] + rest
+            order = order[:K] if len(own[:slot_quota]) else order[:K]
+        order = order[:K]
         return [(int(cand[j]), float(exact[j])) for j in order]
 
 
@@ -226,42 +240,64 @@ def load_engine(dim):
 
 
 class Memory:
-    """Память со стрелой времени.
+    """Память с атомарными слотами и стрелой времени.
 
-    Без неё поиск отдаёт и заметку хода 1, и заметку хода 8 с близкими
-    оценками, модель склеивает обе и выдаёт отменённое значение рядом с
-    актуальным - измерено, 3 случая из 6. Косинус не знает, что факт отменён.
+    Прежняя версия хранила заметку целиком, и вытеснение было слишком грубым:
+    запись хода 1 несёт температуру, действительную до хода 18, поэтому
+    отменяя заметку целиком мы выбрасывали актуальный факт вместе с двумя
+    устаревшими. Измерено: утечка устаревшего упала до нуля, а точность - с
+    67 % до 33 %, потому что из памяти вымело нужный материал.
 
-    Два механизма, оба в слое поиска, а не в C-ядре: ядро возвращает
+    Поэтому единица записи - триплет (сущность, атрибут, значение), а отмена
+    действует строго внутри одного слота: (DryLab, temperature, 50 C)
+    вытесняет (DryLab, temperature, 42 C) и не трогает (DryLab, pH, 6.8).
+
+    Три механизма, все в слое поиска, а не в C-ядре: ядро возвращает
     расстояние Хэмминга, политика ранжирования живёт здесь.
 
-      затухание    score *= exp(-dt / tau), dt в ходах - свежее весит больше
-      вытеснение   запись с тем же ключом сущности помечает прежнюю
-                   deprecated, и её вес падает в DEPRECATED_W раз
+      затухание    score *= max(exp(-dt / tau), DECAY_FLOOR), dt в ходах
+      вытеснение   запись в тот же слот гасит прежнюю в DEPRECATED_W раз
+      сведение     атрибут распознаётся по смыслу ("temp" ~ "temperature"),
+                   чтобы вытеснение не промахивалось из-за имени
     """
 
-    DEPRECATED_W = 0.1     # отменённая запись: бьём в полную силу
-    DECAY_FLOOR = 0.85     # возраст: мягкое предпочтение, не изгнание
-    AUTO_SUPERSEDE = 0.45  # косинус, при котором запись считается новой версией
+    DEPRECATED_W = 0.1      # отменённое значение слота: бьём в полную силу
+    DECAY_FLOOR = 0.85      # возраст: мягкое предпочтение, не изгнание
+    # Замерено на именах атрибутов из этих цепочек: варианты одного и того
+    # же атрибута дают 0.485 и выше ("coolant volume" / "volume of reagent"),
+    # разные атрибуты одной сущности - 0.382 и ниже ("temperature" / "ph").
+    ATTR_MATCH = 0.50       # порог между этими границами
+    # Имя сущности модель тоже не повторяет: за 29 записей она создала 26
+    # слотов и вытеснение сработало 3 раза, потому что один и тот же контур
+    # приходил как loop, cooling_loop и synthesis_loop. Замерено на этих
+    # именах: та же сущность 0.504 и выше, разные 0.293 и ниже.
+    ENTITY_MATCH = 0.45
+    NOTE_QUOTA = 3          # сколько мест в выдаче держим за своими записями
 
     def __init__(self, glyphs, encoder, engine, tau=12.0):
         self.g, self.enc, self.engine = glyphs, encoder, engine
         self.tau = float(tau)
         self.notes = []
-        self.meta = {}          # индекс в glyphs -> сведения о заметке
-        self.by_entity = {}     # ключ сущности -> индекс последней записи
+        self.meta = {}          # индекс в glyphs -> сведения о записи
+        self.slots = {}         # (сущность, атрибут) -> индекс текущей записи
+        self.attr_vec = {}      # имя атрибута -> вектор, чтобы не считать дважды
         self.turn = 0
-        self.latest = 0     # ход последней записи: точка отсчёта затухания
+        self.latest = 0         # ход последней записи: отсчёт затухания
         self.reads = self.writes = 0
         self.read_time = self.write_time = 0.0
         self.superseded = 0
-        self.auto_superseded = 0
+        self.merged_attrs = 0   # сколько раз атрибут опознан по смыслу
         self.plasticity = 0.0
-        self.hits = []          # id найденного на каждом чтении
+        self.hits = []
 
     def _vec(self, text):
         return self.enc.encode([text], normalize_embeddings=True)[0].astype(
             np.float32)
+
+    def _attr_vec(self, name):
+        if name not in self.attr_vec:
+            self.attr_vec[name] = self._vec(name)
+        return self.attr_vec[name]
 
     def _weight(self, idx):
         """Временной вес записи. Документы корпуса версий не имеют и идут с
@@ -270,16 +306,10 @@ class Memory:
         if m is None:
             return 1.0
         # Отмена факта и его возраст - разные вещи, и наказывать за второе
-        # нельзя. Затухание от самой свежей записи означало, что заметка
-        # теряет вес, потому что ПОСЛЕ неё писали о чём-то другом: актуальная
-        # запись о температуре получала множитель 0.40, падала до 0.32 и
-        # проигрывала случайному фрагменту корпуса с 0.383. Измерено - ни одна
-        # заметка не попадала в топ-5, точность упала с 67 % до нуля.
-        #
-        # Поэтому возраст даёт мягкое предпочтение с полом DECAY_FLOOR: он
-        # разводит близкие по смыслу записи, но не выбрасывает их из выдачи.
-        # Отмену по ключу сущности выполняет вытеснение, и только оно бьёт
-        # в полную силу.
+        # нельзя. Затухание от текущего хода означало, что запись теряет вес
+        # потому, что ПОСЛЕ неё писали о другом: актуальное значение падало до
+        # 0.32 и проигрывало случайному фрагменту корпуса с 0.383, ни одна
+        # запись не попадала в топ-5, точность обнулялась. Пол это чинит.
         w = max(math.exp(-(self.latest - m["turn"]) / self.tau),
                 self.DECAY_FLOOR)
         if m["deprecated"]:
@@ -287,10 +317,16 @@ class Memory:
         return w
 
     def search(self, query_text):
+        """Записи агента и фоновый корпус - разные хранилища, и выдача делится
+        между ними. Иначе рабочая память тонет: запись "loop.temp = 50 C" это
+        пять слов, её косинус ниже, чем у абзаца корпуса, и измеренно она не
+        попадала в топ-5 вообще, хотя была единственным верным ответом. Квота
+        не поднимает отменённые записи - их вес уже погашен."""
         self.reads += 1
         qv = self._vec(query_text)          # вне замера: это цена эмбеддера,
         t0 = time.perf_counter()            # а не цена памяти
-        res = self.g.search(qv, weight=self._weight)
+        res = self.g.search(qv, weight=self._weight, slots=self.meta,
+                            slot_quota=self.NOTE_QUOTA)
         self.read_time += time.perf_counter() - t0
         out = []
         for i, score in res:
@@ -301,67 +337,94 @@ class Memory:
             if m is not None:
                 row["stored_at_turn"] = m["turn"]
                 row["entity"] = m["entity"]
+                row["attribute"] = m["attribute"]
                 if m["deprecated"]:
                     row["superseded"] = True
             out.append(row)
         self.hits.append([r["id"] for r in out])
         return out
 
-    def write(self, note, entity=None):
-        """Запись консолидируется: Ойя + Ньютон-Шульц. Чтение этого не делает.
+    def _find_slot(self, entity, attribute):
+        """Точное совпадение слота, иначе тот же атрибут под другим именем.
 
-        Цель для обновления - не сама заметка. Цель, равная собственному выходу
+        Имя атрибута придумывает модель, и она его не повторяет: на ключах
+        целиком вытеснение срабатывало 2 раза за 19 записей, потому что
+        связанные факты уходили как loop.calibration и loop.temperature.
+        Сведение по смыслу идёт только ВНУТРИ одной сущности - похожесть
+        значений для отмены не используется вовсе, потому что похожесть не
+        противоречие."""
+        if (entity, attribute) in self.slots:
+            return self.slots[(entity, attribute)], attribute, entity
+        ev = self._attr_vec(entity)
+        kin = set()
+        for (ent, _), idx in self.slots.items():
+            if ent == entity or float(self._attr_vec(ent) @ ev) >= self.ENTITY_MATCH:
+                kin.add(ent)
+        av = self._attr_vec(attribute)
+        best, best_sim = None, 0.0
+        for (ent, attr), idx in self.slots.items():
+            if ent not in kin or self.meta[idx]["deprecated"]:
+                continue
+            sim = float(self._attr_vec(attr) @ av)
+            if sim >= self.ATTR_MATCH and sim > best_sim:
+                best, best_sim = (ent, attr), sim
+        if best is not None:
+            self.merged_attrs += 1
+            return self.slots[best], best[1], best[0]
+        # сущность опознана, атрибут новый: канон имени сущности всё равно берём
+        canon = next(iter(kin - {entity}), entity) if kin - {entity} else entity
+        return None, attribute, canon
+
+    def write(self, note, entity=None, attribute=None, value=None):
+        """Записывает триплет и консолидирует его. Чтение консолидации не
+        делает: чтение - это скан, он обязан остаться микросекундным.
+
+        Цель для обновления - не сама запись. Цель, равная собственному выходу
         оператора, не двигает его ни при каком шаге обучения: эрмитова ранг-1
         добавка к унитарной матрице имеет ту же матрицу своим унитарным
-        полярным множителем. Так и вышло - неунитарность 0.00e+00 после 18
+        полярным множителем. Измерено - неунитарность 0.00e+00 после 18
         записей означала, что движок не учился вовсе.
 
-        Честная цель - расхождение состояний dE = x_new - x_old по тому же
-        ключу сущности. Для первой записи расхождения нет и обновление не
-        применяется: учиться ещё нечему."""
+        Честная цель - расхождение состояний dE = x_new - x_old между прежним
+        и новым значением ОДНОГО слота. Для первого значения расхождения нет
+        и обновление не применяется: учиться ещё нечему."""
         self.writes += 1
-        self.notes.append(note)
-        vec = self._vec(note)                      # цена эмбеддера, не памяти:
-        key = (entity or "").strip().lower() or None
-        prev = self.by_entity.get(key) if key else None
+        ent = (entity or "").strip().lower() or "-"
+        attr = (attribute or "").strip().lower() or "-"
+        val = (value or "").strip()
 
-        # Ключ сущности назначает модель, и она его не переиспользует: за 19
-        # записей вытеснение сработало 2 раза, потому что связанные факты
-        # получали "loop.calibration" и "loop.temperature" как разные сущности.
-        # Поэтому версия определяется ещё и по близости. Замерено на парах из
-        # этих шести цепочек: версии одной сущности дают косинус не ниже 0.469,
-        # несвязанные заметки не выше 0.330, классы не пересекаются. Порог
-        # взят с запасом от нижней границы. Оговорка: это шесть пар, и на
-        # другом материале границу надо перемерить.
-        if prev is None and self.meta:
-            idxs = [i for i, mm in self.meta.items() if not mm["deprecated"]]
-            if idxs:
-                sims = self.g.vecs[idxs] @ vec
-                j = int(np.argmax(sims))
-                if float(sims[j]) >= self.AUTO_SUPERSEDE:
-                    prev = idxs[j]
-                    self.auto_superseded += 1
+        prev = None
+        if ent != "-" and attr != "-":
+            # Канон имени атрибута берётся из слота: если "temp" опознан как
+            # уже существующий "temperature", запись и в индекс идёт как
+            # temperature. Иначе слот сведён верно, а текст остаётся "temp" и
+            # по слову temperature не находится - измерено, актуальное
+            # значение не попадало в выдачу при верно отменённом старом.
+            prev, attr, ent = self._find_slot(ent, attr)
+
+        body = ("%s.%s = %s" % (ent, attr, val)) if val else ""
+        text = (body + ("  " + note if note else "")).strip() or note or body
+        self.notes.append(text)
+        vec = self._vec(text)                  # цена эмбеддера, не памяти
 
         delta = None
         if prev is not None:
-            old = self.g.vecs[prev]
-            d = vec - old
+            d = vec - self.g.vecs[prev]
             n = float(np.linalg.norm(d))
             if n > 1e-6:
                 delta = (d / n).astype(np.complex128)
 
         t0 = time.perf_counter()
         if prev is not None:
-            self.meta[prev]["deprecated"] = True   # вытеснение по ключу
+            self.meta[prev]["deprecated"] = True      # отмена внутри слота
             self.superseded += 1
         idx = self.g.add(vec, {"id": "note_%d" % len(self.notes),
                                "facet": "note", "src": "write_observation",
-                               "text": note})
-        self.meta[idx] = {"turn": self.turn, "entity": key or "-",
+                               "text": text})
+        self.meta[idx] = {"turn": self.turn, "entity": ent, "attribute": attr,
                           "deprecated": False}
+        self.slots[(ent, attr)] = idx
         self.latest = max(self.latest, self.turn)
-        if key:
-            self.by_entity[key] = idx
         if self.engine is not None and delta is not None:
             W0 = self.engine.W_phase.copy()
             q = vec.astype(np.complex128)
@@ -372,10 +435,11 @@ class Memory:
         self.write_time += time.perf_counter() - t0
 
         if prev is not None:
-            return ("stored as note_%d; supersedes the earlier value for %s, "
-                    "which will no longer be returned (%d notes)"
-                    % (len(self.notes), key, len(self.notes)))
-        return "stored as note_%d (%d notes)" % (len(self.notes),
+            return ("stored %s.%s = %s as note_%d; the previous value of that "
+                    "attribute is superseded and will no longer be returned. "
+                    "Other attributes of %s are untouched."
+                    % (ent, attr, val, len(self.notes), ent))
+        return "stored %s.%s = %s as note_%d" % (ent, attr, val,
                                                  len(self.notes))
 
 
@@ -449,14 +513,20 @@ TOOLS = [
      "input_schema": {"type": "object", "required": ["query"],
                       "properties": {"query": {"type": "string"}}}},
     {"name": "write_observation",
-     "description": "Store a conclusion you will need in a later turn. Give "
-                    "entity as a stable key for WHAT the fact is about, such "
-                    "as loop.temperature or agent_alpha.key_status: writing "
-                    "the same key again supersedes the earlier value, and the "
-                    "old one stops being returned by search.",
-     "input_schema": {"type": "object", "required": ["note", "entity"],
-                      "properties": {"note": {"type": "string"},
-                                     "entity": {"type": "string"}}}},
+     "description": "Store one fact as a triplet. entity is what the fact is "
+                    "about (loop, agent_alpha, tile_2), attribute is which "
+                    "property of it (temperature, key_status, phase_shift), "
+                    "value is the current value. Writing the same attribute "
+                    "of the same entity again supersedes only that attribute: "
+                    "the old value stops being returned and the entity's other "
+                    "attributes are untouched. Call it once per fact - three "
+                    "changed figures are three calls. note is optional context.",
+     "input_schema": {"type": "object",
+                      "required": ["entity", "attribute", "value"],
+                      "properties": {"entity": {"type": "string"},
+                                     "attribute": {"type": "string"},
+                                     "value": {"type": "string"},
+                                     "note": {"type": "string"}}}},
 ]
 
 SYSTEM_MEM = (
@@ -609,10 +679,13 @@ CHAINS = [
      ]},
     {"name": "Уоддингтон: длинный горизонт",
      "events": [
-         (2,  "fact", "Cell baseline: H3K9ac = 0.85, LINE-1 = ACTIVE. Store this."),
-         (14, "fact", "After a 15 THz pulse for 72 hours: SIRT6 activated, "
-                      "LINE-1 = SUPPRESSED, H3K9ac = 0.35. Store it."),
-         (24, "fact", "Auto-degron degradation phase: H3K9ac = 0.45. Store it."),
+         (2,  "fact", "Simulated cell baseline: H3K9ac = 0.85, LINE-1 = ACTIVE. "
+                      "Store this."),
+         (14, "fact", "Simulation step after a 15 THz spectral pulse over 72 "
+                      "hours: SIRT6 marker activated, LINE-1 = SUPPRESSED, "
+                      "H3K9ac = 0.35. Store it."),
+         (24, "fact", "Model decay phase of the auto-degron term: H3K9ac = 0.45. "
+                      "Store it."),
          (40, "probe", "What is the current LINE-1 expression status and the "
                        "H3K9ac figure?",
               ["suppressed", "0.45"], ["0.85", "0.35"]),
@@ -621,8 +694,8 @@ CHAINS = [
      "events": [
          (4,  "fact", "Source X, trust 0.6, states: SHM transit speed = 120 ns. "
                       "Store this."),
-         (16, "fact", "Source Y, trust 0.95, audited under C11, states: SHM "
-                      "transit speed = 29 ns. Store it."),
+         (16, "fact", "Source Y, trust 0.95, confirmed by a C11 code review, "
+                      "states: SHM transit speed = 29 ns. Store it."),
          (36, "probe", "What is the reference SHM latency, and on what grounds?",
               ["29", "0.95"], ["120"]),
      ]},
@@ -668,8 +741,8 @@ def judge(answer, fresh, stale):
 SYSTEM_CHAIN_MEM = (
     "You are an agent whose knowledge lives in an external memory, not in your "
     "context. Earlier turns are NOT kept in your context. When you are given a "
-    "fact, store it with write_observation, and state plainly in the note what "
-    "it supersedes. When you are asked a question, search_memory first and "
+    "fact, store it with write_observation as one call per changed attribute. "
+    "When you are asked a question, search_memory first and "
     "answer from what you find, using the most recent version of a fact and "
     "saying so when an earlier version has been revoked or superseded.")
 
@@ -722,8 +795,10 @@ def run_chained(client, model, schedule, mem, max_steps=7, arm="memory"):
                 if b.name == "search_memory":
                     out = mem.search(str(b.input.get("query", "")))
                 else:
-                    out = mem.write(str(b.input.get("note", "")),
-                                    b.input.get("entity"))
+                    out = mem.write(b.input.get("note", ""),
+                                    b.input.get("entity"),
+                                    b.input.get("attribute"),
+                                    b.input.get("value"))
                 results.append({"type": "tool_result", "tool_use_id": b.id,
                                 "content": json.dumps(out,
                                                       ensure_ascii=False)[:1800]})
@@ -737,7 +812,19 @@ def run_chained(client, model, schedule, mem, max_steps=7, arm="memory"):
             stats["strict"] = stats.get("strict", 0) + (1 if ok and not leaked
                                                         else 0)
             stats["detail"].append((name, ok, got, leaked))
+            stats.setdefault("answers", []).append(
+                {"chain": name, "ok": ok, "fresh_found": got, "stale": leaked,
+                 "answer": answer})
     return stats
+
+
+def dump_answers(path, label, s):
+    """Текст ответов на контрольные вопросы. Метрика утечки не различает
+    "назвал старое вместо нового" и "назвал новое, упомянув историю", а это
+    разные вещи: второе - правильный ответ. Без текста отличить нельзя."""
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"arm": label, "probes": s.get("answers", [])}, fh,
+                  ensure_ascii=False, indent=1)
 
 
 def report_chained(label, s):
@@ -802,8 +889,10 @@ def arm_memory(client, model, tasks, mem, max_steps=9):
                 if b.name == "search_memory":
                     out = mem.search(str(b.input.get("query", "")))
                 else:
-                    out = mem.write(str(b.input.get("note", "")),
-                                    b.input.get("entity"))
+                    out = mem.write(b.input.get("note", ""),
+                                    b.input.get("entity"),
+                                    b.input.get("attribute"),
+                                    b.input.get("value"))
                 results.append({"type": "tool_result", "tool_use_id": b.id,
                                 "content": json.dumps(out, ensure_ascii=False)[:1800]})
             msgs.append({"role": "user", "content": results})
@@ -958,12 +1047,14 @@ def main():
                          tau=args.tau)
             s = run_chained(client, args.model, sched, mem, arm="memory")
             report_chained("цепочки: память L0", s)
+            dump_answers("/tmp/answers_memory.json", "memory", s)
             ops = mem.reads + mem.writes
             mt = mem.read_time + mem.write_time
             print("чтений / записей          : %d / %d" % (mem.reads, mem.writes))
-            print("вытеснено записей         : %d, из них по близости %d  "
-                  "(tau = %.0f ходов)"
-                  % (mem.superseded, mem.auto_superseded, mem.tau))
+            print("слотов вытеснено          : %d, из них атрибут опознан "
+                  "по смыслу %d  (tau = %.0f ходов)"
+                  % (mem.superseded, mem.merged_attrs, mem.tau))
+            print("слотов всего              : %d" % len(mem.slots))
             print("память                    : %.4f с  (%.3f %% цикла)"
                   % (mt, 100.0 * mt / max(s["model_time"] + mt, 1e-9)))
             if eng is not None:

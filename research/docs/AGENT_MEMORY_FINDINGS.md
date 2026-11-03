@@ -248,6 +248,90 @@ later probe depends on. Until the chains are phrased clear of that, differences
 between the arms on this task set are inside the noise, and only the memory
 arm's internal comparison above is safe to read.
 
+### Atomic slots: entity, attribute, value
+
+Retiring a note wholesale was too coarse — the turn-1 calibration carries a
+temperature valid until turn 18, so tombstoning the note discarded a live fact
+with two stale ones, and accuracy fell to 33 % while stale output fell to zero.
+The unit of storage is now a triplet, and supersession acts inside one slot:
+`(loop, temperature, 50 C)` retires `(loop, temperature, 42 C)` and leaves
+`(loop, pH, 6.8)` alone.
+
+Two further mechanisms were needed, both because the model does not reuse the
+keys it invents.
+
+**Attribute names.** 19 writes produced 2 tombstones: related facts arrived as
+`loop.calibration` and `loop.temperature`. Attribute names are now matched
+semantically inside one entity, and the record is stored under the existing
+name — without that canonicalisation the slot merged correctly while the text
+stayed `loop.temp` and could not be found by the word "temperature". Measured on
+these chains: variants of one attribute score 0.485 and above, different
+attributes of one entity 0.382 and below; threshold 0.50.
+
+**Entity names.** The next run produced 26 slots from 29 writes and 3
+tombstones, because one loop arrived as `loop`, `cooling_loop` and
+`synthesis_loop`. Entity names are matched the same way: same entity 0.504 and
+above, different 0.293 and below; threshold 0.45. After that, 12 to 14 slots are
+retired per run, 8 to 9 of them through semantic matching.
+
+**Working memory is searched separately.** A record reading `loop.temp = 50 C`
+is five words, and its cosine loses to a paragraph of corpus prose: measured, no
+record reached the top 5 at all even when one was the only correct answer. The
+agent's own records are now scanned in full rather than filtered by the Hamming
+stage, and three of five result slots are held for them. Superseded records are
+not lifted by the quota — their weight is already extinguished.
+
+### Result, Haiku 5.5, 42 turns
+
+| | memory L0 | full context |
+|---|---|---|
+| accuracy on overwritten state | **5/6 (83 %)** | 2/6 (33 %) |
+| reported a stale fact | 3/6 | 2/6 |
+| tokens per turn | 8,411 | 4,041 |
+| non-unitarity after 33 writes | **4.09e-07** | — |
+| memory share of loop | 0.155 % | — |
+
+83 % held across two runs, and the memory arm is now ahead of the control on
+accuracy by a wide margin. The token result does not change: a fact is one line,
+the control's context grows by 181 tokens per turn, and 2.9 model calls per turn
+cost more than that.
+
+### The leak metric measures the wrong thing, in both directions
+
+Reading the actual answers settles it. Of three flagged leaks, two are correct
+answers that cite history:
+
+> The current cooling loop calibration: **Temperature: 50 °C.** This is a
+> validator correction that supersedes the earlier baseline of 42 °C.
+
+That is the behaviour we want, scored as a failure. And the reverse happens too:
+the Waddington chain was scored **correct** while being wrong —
+
+> **H3K9ac: 0.35.** [...] Don't confuse the H3K9ac figure with the separate
+> value of 0.45 stored for the "auto-degron term" entity.
+
+0.45 appears in the text, inside a denial, so substring matching counted it as
+found. The real accuracy is 4 of 6, not 5. Substring scoring cannot tell
+"asserted instead of" from "mentioned as superseded", and it will keep flattering
+or punishing at random. **The next version of this metric has to read the
+assertion, not the string.**
+
+That failure also has a cause worth naming: `auto-degron term` reads as its own
+entity, so the turn-24 update landed in a different slot from the turn-14 state.
+The chain's own wording created the split — the phrasing came from clearing the
+refusals, and it traded one artefact for another.
+
+### Clearing the refusals did not work
+
+Rewording chains 5 and 6 cleared refusals when each chain was tested alone, and
+the control arm still produced 5 to 6 refusals per run — landing on `Validator
+correction: temperature raised to 50 C`, on corpus fillers, and once on a probe.
+So the trigger is not the wording of those two chains: with a long accumulated
+history, the model begins refusing on innocuous turns. The memory arm, which
+carries no history, sees none. Until this is understood, the control arm's
+accuracy cannot be compared with anything.
+
+
 ## 6. Two defects found in this stand, and fixed
 
 **The search ignored the query.** The first version hashed the query text to a
