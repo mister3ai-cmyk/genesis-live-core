@@ -185,7 +185,68 @@ back.
 | plasticity per update | 1.57e-02 | — |
 
 Plasticity is per single update and the engine clips `||dW||_F <= 0.05`, so the
-0.05 figure is reached over three to four updates rather than one.
+0.05 figure is reached over three to four updates rather than one. Over a whole
+session drift still accumulated to 8.04e-04, because the engine's second
+corrective step was gated at 1e-03 and never fired; the gate is now 1e-06 and
+the figure is 9.85e-08. See the trade-off section below for what the arrow of
+time did and did not buy.
+
+### The arrow of time is a trade-off, not a fix
+
+Three configurations of the same memory arm, same six chains, Haiku 5.5, 42
+turns. The target was 0 % stale and over 85 % accuracy. No configuration
+reaches both, and the two metrics move against each other.
+
+| configuration | accuracy on overwritten state | reported a stale fact | tombstoned |
+|---|---|---|---|
+| no arrow of time | 4/6 (67 %) | 3/6 (50 %) | — |
+| entity key + decay with floor | 4/6 (67 %) | 2/6 (33 %) | 2 |
+| + auto-tombstone by cosine | 2/6 (33 %) | **0/6 (0 %)** | 10, of which 9 automatic |
+
+**Why the entity key alone is weak.** The key is chosen by the model, and the
+model does not reuse it: across 19 writes, tombstoning fired twice, because
+related facts were filed as `loop.calibration` and `loop.temperature` — two
+entities as far as the index is concerned.
+
+**Why automatic tombstoning overshoots.** On pairs drawn from these chains the
+two classes separate cleanly — versions of one entity score at least 0.469,
+unrelated notes at most 0.330 — so a 0.45 threshold looked safe. In the run it
+fired nine times and took live facts with it: stale output fell to zero because
+the memory had been emptied of the material the question needed. Six pairs were
+not enough to set that boundary, which was stated as a caveat before the run
+and is now a measurement.
+
+**What this says about the mechanism.** Similarity is not contradiction. Two
+notes about the same quantity are similar whether one supersedes the other or
+they describe different attributes of it — the turn-1 calibration holds the
+temperature that stays valid until turn 18, so retiring the whole note throws
+away a current fact along with two stale ones. A correct mechanism has to detect
+a **conflicting assertion about the same attribute**, which is not a distance in
+embedding space. Facts need fields, not just vectors.
+
+### What the fixes did achieve
+
+Reconsolidation now learns. The target is the state-error vector between
+successive notes under one key, and the engine's drift guardrail fires at 1e-06
+rather than the 1e-03 that never fired at all:
+
+| | before | after |
+|---|---|---|
+| non-unitarity after 19 writes | 8.04e-04 | **9.85e-08** |
+| offset from identity | 1.28e-02 | 2.76e-02 |
+
+Plasticity is 9.1e-03 per update against the engine's own `||dW||_F <= 0.05`
+clip, so the 0.05 figure in the specification is reached over several updates,
+not one.
+
+### The control arm is too noisy to rank against
+
+Identical reruns of the full-context arm gave 83 %, 33 % and 50 % accuracy with
+1, 6 and 2 refusals respectively. The refusals land on the 15 THz pulse chain
+and the trust-conflict chain, and a refused turn silently removes a fact the
+later probe depends on. Until the chains are phrased clear of that, differences
+between the arms on this task set are inside the noise, and only the memory
+arm's internal comparison above is safe to read.
 
 ## 6. Two defects found in this stand, and fixed
 

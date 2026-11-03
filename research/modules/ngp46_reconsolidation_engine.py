@@ -120,11 +120,15 @@ class NGP46ReconsolidationEngineHPC:
         W_H_W = np.dot(np.conj(W_temp.T), W_temp)
         self.W_phase = 0.5 * np.dot(W_temp, (3.0 * I - W_H_W))
 
-        # Unitarity drift guardrail: second corrective step if residual > 1e-3
+        # Unitarity drift guardrail: second corrective step if residual > 1e-6.
+        # The threshold was 1e-3, which never fired across a session of real
+        # updates and let drift accumulate to 8.04e-04 after 19 writes - under
+        # the old threshold, over the 1e-05 the specification asks for. One
+        # extra O(N^2) step is cheap against a 18.3 ms update at dim 384.
         residual = np.linalg.norm(
             np.dot(np.conj(self.W_phase.T), self.W_phase) - I, "fro"
         )
-        if residual > 1e-3:
+        if residual > 1e-6:
             W_H_W = np.dot(np.conj(self.W_phase.T), self.W_phase)
             self.W_phase = 0.5 * np.dot(self.W_phase, (3.0 * I - W_H_W))
 

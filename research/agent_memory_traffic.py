@@ -240,7 +240,9 @@ class Memory:
                    deprecated, и её вес падает в DEPRECATED_W раз
     """
 
-    DEPRECATED_W = 0.1
+    DEPRECATED_W = 0.1     # отменённая запись: бьём в полную силу
+    DECAY_FLOOR = 0.85     # возраст: мягкое предпочтение, не изгнание
+    AUTO_SUPERSEDE = 0.45  # косинус, при котором запись считается новой версией
 
     def __init__(self, glyphs, encoder, engine, tau=12.0):
         self.g, self.enc, self.engine = glyphs, encoder, engine
@@ -253,6 +255,7 @@ class Memory:
         self.reads = self.writes = 0
         self.read_time = self.write_time = 0.0
         self.superseded = 0
+        self.auto_superseded = 0
         self.plasticity = 0.0
         self.hits = []          # id найденного на каждом чтении
 
@@ -266,12 +269,19 @@ class Memory:
         m = self.meta.get(idx)
         if m is None:
             return 1.0
-        # Затухание считается от САМОЙ СВЕЖЕЙ записи, не от текущего хода.
-        # Иначе штраф получают только заметки - у документов корпуса времени
-        # нет и множителя тоже - и фоновый шум обгоняет всё, что агент сам
-        # записал. Измерено: все три заметки вылетели из топ-5, их места
-        # заняли случайные фрагменты с оценкой 0.38.
-        w = math.exp(-(self.latest - m["turn"]) / self.tau)
+        # Отмена факта и его возраст - разные вещи, и наказывать за второе
+        # нельзя. Затухание от самой свежей записи означало, что заметка
+        # теряет вес, потому что ПОСЛЕ неё писали о чём-то другом: актуальная
+        # запись о температуре получала множитель 0.40, падала до 0.32 и
+        # проигрывала случайному фрагменту корпуса с 0.383. Измерено - ни одна
+        # заметка не попадала в топ-5, точность упала с 67 % до нуля.
+        #
+        # Поэтому возраст даёт мягкое предпочтение с полом DECAY_FLOOR: он
+        # разводит близкие по смыслу записи, но не выбрасывает их из выдачи.
+        # Отмену по ключу сущности выполняет вытеснение, и только оно бьёт
+        # в полную силу.
+        w = max(math.exp(-(self.latest - m["turn"]) / self.tau),
+                self.DECAY_FLOOR)
         if m["deprecated"]:
             w *= self.DEPRECATED_W
         return w
@@ -314,6 +324,23 @@ class Memory:
         vec = self._vec(note)                      # цена эмбеддера, не памяти:
         key = (entity or "").strip().lower() or None
         prev = self.by_entity.get(key) if key else None
+
+        # Ключ сущности назначает модель, и она его не переиспользует: за 19
+        # записей вытеснение сработало 2 раза, потому что связанные факты
+        # получали "loop.calibration" и "loop.temperature" как разные сущности.
+        # Поэтому версия определяется ещё и по близости. Замерено на парах из
+        # этих шести цепочек: версии одной сущности дают косинус не ниже 0.469,
+        # несвязанные заметки не выше 0.330, классы не пересекаются. Порог
+        # взят с запасом от нижней границы. Оговорка: это шесть пар, и на
+        # другом материале границу надо перемерить.
+        if prev is None and self.meta:
+            idxs = [i for i, mm in self.meta.items() if not mm["deprecated"]]
+            if idxs:
+                sims = self.g.vecs[idxs] @ vec
+                j = int(np.argmax(sims))
+                if float(sims[j]) >= self.AUTO_SUPERSEDE:
+                    prev = idxs[j]
+                    self.auto_superseded += 1
 
         delta = None
         if prev is not None:
@@ -427,7 +454,7 @@ TOOLS = [
                     "as loop.temperature or agent_alpha.key_status: writing "
                     "the same key again supersedes the earlier value, and the "
                     "old one stops being returned by search.",
-     "input_schema": {"type": "object", "required": ["note"],
+     "input_schema": {"type": "object", "required": ["note", "entity"],
                       "properties": {"note": {"type": "string"},
                                      "entity": {"type": "string"}}}},
 ]
@@ -934,8 +961,9 @@ def main():
             ops = mem.reads + mem.writes
             mt = mem.read_time + mem.write_time
             print("чтений / записей          : %d / %d" % (mem.reads, mem.writes))
-            print("вытеснено по ключу        : %d записей  (tau = %.0f ходов)"
-                  % (mem.superseded, mem.tau))
+            print("вытеснено записей         : %d, из них по близости %d  "
+                  "(tau = %.0f ходов)"
+                  % (mem.superseded, mem.auto_superseded, mem.tau))
             print("память                    : %.4f с  (%.3f %% цикла)"
                   % (mt, 100.0 * mt / max(s["model_time"] + mt, 1e-9)))
             if eng is not None:
