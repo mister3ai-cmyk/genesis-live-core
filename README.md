@@ -393,12 +393,47 @@ latency, above it hnswlib pulls away and keeps an 8-13 point lead on recall
 throughout. Recall wobbles by a few points between sizes because only 100 queries
 are used; the trend, not the individual figure, is the signal.
 
-What survives the comparison, and does so at every size:What survives the comparison, and does so at every size:
+**Two crossovers, and they pull in opposite directions.** Everything above
+measures a static corpus, which is the workload a search index has and not the
+one an agent's memory has. `benchmarks/mixed_workload.py` interleaves queries
+with insertions and makes both engines pay the real cost of absorbing the
+writes: for the cascade an insert is one encode and an append, for a graph it is
+a node to be linked in.
+
+At 70,000 vectors, above the size crossover where hnswlib wins on pure queries:
+
+| write fraction | genesis-l0 op/s | hnswlib op/s | ratio |
+|---|---|---|---|
+| 0 % | 2,743 | **3,025** | 0.91x |
+| 1 % | 2,752 | **3,083** | 0.89x |
+| 5 % | **2,973** | 2,716 | 1.09x |
+| 10 % | **3,021** | 2,484 | 1.22x |
+| 25 % | **3,547** | 2,020 | 1.76x |
+| 50 % | **5,333** | 1,576 | 3.38x |
+
+**Five percent of operations being writes is enough to cancel a corpus size that
+otherwise loses.** The direction matters as much as the ratio: hnswlib's
+throughput halves as writes rise, 3,025 to 1,576, while the cascade's nearly
+doubles, 2,743 to 5,333, because for a flat scan an insertion is cheaper than a
+query and for a graph it is dearer.
+
+So the two crossovers are orthogonal. Corpus size favours the graph; write
+fraction favours the scan. A memory that is read-only wants a graph. A memory
+that changes while it is being read reaches the five-percent line without
+trying.
+
+Caveats: hnswlib's index was built single-threaded, only insertions were
+measured and not deletions, and this is throughput rather than a latency
+percentile.
+
+
+What survives the comparison, and does so at every size:
 
 * **Hot structure 2x smaller.** 1.01 MiB of codes against a 2.03 MiB graph, both
   sitting in front of the same 65 MiB of vectors. Cache residency, not RAM.
-* **Build: 43x faster, and streaming.** Encoding is O(1) per vector with no graph
-  to maintain, so inserts cost nothing to amortise. HNSW pays for every insert.
+* **Build: 28x faster, and streaming.** Encoding is O(1) per vector with no graph
+  to maintain. The mixed-workload table above measures the same property from
+  the other side: throughput rises with the write fraction instead of falling.
 * **Faster than FAISS on identical codes**, by 1.4-2.2x. Same algorithm, same
   inputs, same candidate pool - that margin is implementation, and it is the one
   claim here that is purely about the code in `src/`.
