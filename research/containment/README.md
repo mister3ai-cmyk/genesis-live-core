@@ -16,7 +16,7 @@ Change Date: **2029-09-24** → Apache License 2.0
 Full text: [LICENSE](../../LICENSE)
 
 Non-commercial, research, and educational use is free of charge.  
-Commercial use requires a separate written license: research@syn.ai
+Commercial use requires a separate written license: contact@synapse-core.pp.ua
 
 ---
 
