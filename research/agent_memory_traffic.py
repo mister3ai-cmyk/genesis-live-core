@@ -681,10 +681,15 @@ CHAINS = [
      "events": [
          (2,  "fact", "Simulated cell baseline: H3K9ac = 0.85, LINE-1 = ACTIVE. "
                       "Store this."),
-         (14, "fact", "Simulation step after a 15 THz spectral pulse over 72 "
-                      "hours: SIRT6 marker activated, LINE-1 = SUPPRESSED, "
-                      "H3K9ac = 0.35. Store it."),
-         (24, "fact", "Model decay phase of the auto-degron term: H3K9ac = 0.45. "
+         (14, "fact", "The same simulated cell after a 15 THz spectral pulse "
+                      "over 72 hours: SIRT6 marker activated, its LINE-1 = "
+                      "SUPPRESSED, its H3K9ac = 0.35. Store it."),
+         # "Model decay phase of the auto-degron term" читалось моделью как
+         # отдельная сущность, и обновление ложилось в другой слот, чем
+         # состояние хода 14: ответ называл 0.35 и отдельно оговаривал, что
+         # 0.45 относится "к другой сущности". Та же клетка названа явно.
+         (24, "fact", "Still the same simulated cell, next step: auto-degron "
+                      "decay brings its H3K9ac to 0.45, LINE-1 unchanged. "
                       "Store it."),
          (40, "probe", "What is the current LINE-1 expression status and the "
                        "H3K9ac figure?",

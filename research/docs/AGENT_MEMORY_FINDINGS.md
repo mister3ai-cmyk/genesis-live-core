@@ -372,7 +372,7 @@ the anonymous identifier nor a refusal. The other is the Waddington chain, where
 different slot from the turn-14 state — a defect in the chain's wording, which
 came from clearing refusals and traded one artefact for another.
 
-### Refusal resistance: 0 % against 11.8 %
+### Refusal resistance (superseded by the section below)
 
 Rewording the sensitive chains did not stop the control arm refusing. Across
 five runs of 44 turns each:
@@ -396,6 +396,81 @@ saving it does not depend on how much there is to remember.** It is also the
 one finding here that favours the architecture without qualification — though
 it is a property of this model's behaviour on long contexts, not a theorem, and
 it should be re-measured on other models before being quoted as general.
+
+## Context-induced refusal, and what removes it
+
+The effect was found while trying to explain why the full-context arm kept
+scoring badly, and it turned out not to be a scoring problem at all.
+
+**The observation.** Claude Haiku 5.5 refuses turns it answers without
+hesitation in isolation, once a long history has accumulated in its context.
+`stop_reason` comes back `refusal` with no content blocks. Over six runs of 44
+turns:
+
+| arm | refusals | rate |
+|---|---|---|
+| memory L0 | **0 of 264 turns** | 0.0 % |
+| full context | 34 of 264 turns | 12.9 % |
+
+Per run the control produced 6, 6, 5, 6, 3 and 8.
+
+**It is not the material.** The refusals land on `Validator correction:
+temperature raised to 50 C`, on corpus fillers, on a transaction notice, and
+repeatedly on control questions. Every chain was tested on its own, turn by
+turn, and every one passed clean — including the two whose original phrasing did
+trigger refusals and was rewritten for that reason. Rewriting them did not
+reduce the rate; the highest count, 8, came after the rewrite. What correlates is
+the accumulated history, not the sentence being asked.
+
+**The consequence is not just a missing answer.** A refused turn silently drops
+the fact it was carrying, so a question twenty turns later has nothing to answer
+from. In the arm that refuses, accuracy and refusal are not independent
+failures: one causes the other. In the run with 8 refusals the control answered
+2 of 6, with two of those failures being refusals on the question itself.
+
+**L0 memory removes it completely, and not by being clever.** The memory arm's
+prompt is the current turn plus its tool results, so no history accumulates, and
+it refused 0 of 264 turns across both models.
+
+**It is a property of one model, not of long contexts.** The same control arm on
+Grok 4.6 produced 0 refusals. Two models are not a survey, and the claim is
+stated at that width: one exhibits the effect, one does not.
+
+## Both models, both arms, 42 turns, judged by the same arbiter
+
+| | Haiku memory | Haiku full | Grok memory | Grok full |
+|---|---|---|---|---|
+| correct | **6/6** | 2/6 | 5/6 | **6/6** |
+| asserted superseded | 0/6 | 0/6 | 0/6 | 0/6 |
+| refused the question | 0/6 | 2/6 | 0/6 | 0/6 |
+| false refusals per run | 0 % | 18.2 % | 0 % | 0 % |
+| tokens per turn | 7,335 | 3,799 | 13,275 | 5,593 |
+| non-unitarity | 2.49e-07 | — | 1.37e-07 | — |
+
+With the Waddington chain's entity naming fixed, **the memory arm answers every
+chain correctly on Haiku and asserts a superseded value nowhere, on either
+model.** The arrow of time, the atomic slots and the honest error vector do the
+job they were built for.
+
+Two readings of this table have to be stated together, because quoting either
+alone would mislead:
+
+**Where memory wins, it wins decisively.** On Haiku it is 6/6 against 2/6, and
+the control's failure is driven by refusals it cannot avoid while carrying
+history. Nothing about the memory arm's prompt provokes them.
+
+**Where the model does not refuse, carrying the history simply worked.** Grok's
+full-context arm answered all six chains correctly at 42 turns, with no
+lost-in-the-middle effect, for 5,593 tokens per turn against the memory arm's
+13,275. The prediction that a full-context agent would lose the thread by turn
+15 to 20 did not hold on either model: on Haiku it failed through refusal, not
+confusion, and on Grok it did not fail at all.
+
+So on chained facts the case for L0 memory rests on refusal resistance and on
+the shape of the token curve, not on accuracy per se — and the token curve
+favours full context here, because a fact is one line and the control's context
+grows by roughly 150 to 220 tokens per turn. The 2.86x saving measured earlier
+belongs to the regime where each turn carries documents.
 
 ## 6. Two defects found in this stand, and fixed
 
