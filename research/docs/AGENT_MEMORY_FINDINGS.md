@@ -397,7 +397,9 @@ one finding here that favours the architecture without qualification — though
 it is a property of this model's behaviour on long contexts, not a theorem, and
 it should be re-measured on other models before being quoted as general.
 
-## Context-induced refusal, and what removes it
+## Context-Induced Alignment Refusal, and what removes it
+
+*Named by the architecture's designer; abbreviated CIAR below.*
 
 The effect was found while trying to explain why the full-context arm kept
 scoring badly, and it turned out not to be a scoring problem at all.
