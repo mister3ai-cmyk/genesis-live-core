@@ -30,7 +30,7 @@ query has its own distinct set of true neighbours.
   association  256-dim retrieval blended with Hebbian edge evidence.
 
 Usage: python3 recovery_experiment.py
-Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
+Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see research/LICENSE.
 """
 import argparse
 import glob

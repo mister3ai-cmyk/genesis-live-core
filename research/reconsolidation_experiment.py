@@ -25,7 +25,7 @@ The experiment is falsifiable: if reconsolidation does nothing, the two lines
 sit on top of each other.
 
 Usage: python3 reconsolidation_experiment.py [--dim 256] [--topics 20]
-Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
+Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see research/LICENSE.
 """
 import argparse
 import glob

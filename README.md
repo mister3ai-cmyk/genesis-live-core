@@ -680,9 +680,9 @@ Milestones, deliverables and acceptance criteria: [ROADMAP_NLNET.md](ROADMAP_NLN
 
 ### 🛡️ Licensing (Split / Open Core)
 
-* **Core, Apache-2.0:** `src/` and `benchmarks/` are licensed under the [Apache License 2.0](LICENSE), with no restrictions on production use, instruction set, core count or memory, and no node-locking. All work listed in [ROADMAP_NLNET.md](ROADMAP_NLNET.md), including the SIMD kernels, is released under Apache-2.0.
-* **Research, BSL 1.1:** `research/` holds research modules and earlier harnesses under the Business Source License 1.1 (see [research/LICENSE](research/LICENSE)). It is not needed to build or run the core or the benchmarks.
-* **Version history:** commits from 2026-10-16 to 2026-10-18 placed the core under BSL 1.1. The core is Apache-2.0 again from the commit that added this section. v1.0.0 and earlier versions were always Apache-2.0.
+* **Core, Apache-2.0:** `src/`, `tests/` and `benchmarks/` are licensed under the [Apache License 2.0](LICENSE), with no restrictions on production use, instruction set, core count or memory, and no node-locking. All work listed in [ROADMAP_NLNET.md](ROADMAP_NLNET.md), including the SIMD kernels, is released under Apache-2.0.
+* **Research, BSL 1.1:** `research/` holds research modules and earlier harnesses under the Business Source License 1.1 (see [research/LICENSE](research/LICENSE)). It is not needed to build or run the core or the benchmarks. It is an experimental benchmarking stand outside the NLnet deliverables, and it holds the code behind the agent-memory figures above and the 51 Python tests.
+* **Version history:** commits from 2026-10-16 to 2026-10-18 placed the core under BSL 1.1. The core is Apache-2.0 again from the commit that added this section. v1.0.0 and earlier versions were always Apache-2.0. Eight files in `research/` carried Apache-2.0 headers until 2026-11-05 and now follow `research/LICENSE`; versions already published under those headers remain available under Apache-2.0.
 * **Academic Reference & Prior Art:** Archived on Zenodo, concept DOI (always resolves to the latest version) [`10.5281/zenodo.22926046`](https://doi.org/10.5281/zenodo.22926046).
 
 Integration questions: open an issue or contact the author via LinkedIn.

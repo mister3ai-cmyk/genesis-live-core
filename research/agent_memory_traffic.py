@@ -40,7 +40,7 @@ Usage:
   python3 agent_memory_traffic.py --arm memory --model claude-haiku-5-5
   python3 agent_memory_traffic.py --arm full   --model claude-haiku-5-5
   python3 agent_memory_traffic.py --arm both   --provider openai --model grok-4.6
-Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
+Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see research/LICENSE.
 """
 import argparse
 import ctypes

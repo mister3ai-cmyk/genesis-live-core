@@ -24,7 +24,7 @@ by five orders of magnitude and stability costs a factor of 2.5 - the existing
 guardrails absorb it, which is what they were for.
 
 Run: python3 -m pytest research/tests/test_reconsolidation_plasticity.py -q
-Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
+Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see research/LICENSE.
 """
 import importlib.util
 import os

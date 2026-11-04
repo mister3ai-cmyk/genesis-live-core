@@ -1,7 +1,7 @@
 # Pre-flight audit report: genesis-live-core
 
 **2026-11-05. Self-audit by the project, not a third-party certification. Covers
-commit `d49afdc` (5 checklist blocks, 84 automated checks, 12 strict compiles).
+the commit tagged `v4.6-preflight-2026-11-05` (5 checklist blocks, 84 automated checks, 12 strict compiles).
 NLnet proposal #2026-11-322, not yet funded.**
 
 **Environment:** clean `git clone` on WSL2 (kernel 5.10), GCC 15.2, Python 3.14.4,
@@ -71,8 +71,13 @@ The invariant script prints `||W - I|| = 3.623e-01` (threshold > 5e-02),
 `||W^H W - I|| = 4.444e-06` (threshold < 1e-04) and, for the inert control,
 `||W - I|| = 8.781e-07`.
 
-CI (`.github/workflows/benchmark.yml`) runs the C tests and the benchmark. It does
-not run the Python tests.
+CI (`.github/workflows/benchmark.yml`) runs the C tests and the benchmark and now
+also the Python tests and the invariant script. Those commands were checked in a
+clean virtual environment; the new CI job first runs on push, so its result is not
+part of this audit.
+
+Of the 84 checks, the 33 C checks cover the Apache-2.0 core. The 51 Python tests
+cover code under `research/`, which is BSL 1.1 and outside the NLnet deliverables.
 
 ## 4. Documentation against code
 
@@ -113,10 +118,18 @@ Corrected in this audit:
   3.62e-01 and 4.44e-06; the stability cost is now a factor of 2.5, not 1.6.
 - Latency rows now name the code path each figure measures.
 
-**Licensing.** `LICENSE` is Apache-2.0 for `src/`, `benchmarks/` and `tests/`;
-`research/LICENSE` is BSL 1.1. The roadmap's deliverables do not depend on
-`research/`, but the memory stand behind the section 4 figures lives there. Eight
-source files under `research/` carry Apache-2.0 headers inside the BSL directory.
+**Licensing.** The repository has two parts:
+
+- `src/`, `tests/` and `benchmarks/` are Apache-2.0. The NLnet proposal builds on
+  this part (`ROADMAP_NLNET.md`).
+- `research/` is BSL 1.1 (`research/LICENSE`): an experimental benchmarking stand
+  that also holds internal material, outside the NLnet deliverables. BSL 1.1 is not
+  an open-source license. The memory stand behind the section 4 figures lives here.
+
+Eight files under `research/` carried Apache-2.0 headers and now follow
+`research/LICENSE`; versions already published under those headers remain available
+under Apache-2.0. `benchmarks/bench_chroma.py` is Apache-2.0 but compares against
+`genesis-l0` from PyPI, which is licensed separately under BSL 1.1 (`README.md:219`).
 `benchmarks/scan_sweep.sh` gained its missing SPDX line.
 
 **Unverified claims.** Older material under `research/`, including `synvision/`,

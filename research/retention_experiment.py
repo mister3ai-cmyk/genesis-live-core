@@ -37,7 +37,7 @@ unlimited number. Retention falling as the new set grows is expected; the
 question is whether reconsolidation falls more slowly than naive accumulation.
 
 Usage: python3 retention_experiment.py [--dim 64] [--old 20] [--new 60]
-Licensed under the Apache License, Version 2.0 (SPDX: Apache-2.0); see LICENSE.
+Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see research/LICENSE.
 """
 import argparse
 import importlib.util
