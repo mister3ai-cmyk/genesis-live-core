@@ -332,6 +332,150 @@ anything other than `SHM_PIN_LOCKED` as "page reclaim can evict the working set"
 
 ---
 
+### 🧠 Dynamic Swarm Memory (NGP 4.6): what an agent's turn costs
+
+The benchmark above measures a **static index**: a corpus is built once and
+queried. The second half of this work measures a **changing** memory — an agent
+that stores facts, revises them, and is asked about them twenty turns later —
+against the control every agent framework uses today, which keeps the whole
+history in the prompt.
+
+Stand: `research/agent_memory_traffic.py`. Corpus: 4,000 paragraph chunks of
+this project's own documentation, closed material no model has seen in training,
+so the model cannot answer from its weights and skip memory. Judge: a separate
+Anthropic model that reads each answer against the current and superseded values
+and grades the **assertion**, not the presence of a string.
+
+| | measured | where |
+|---|---|---|
+| Hamming scan + exact re-rank, 4,000 × 384-dim | **271 µs** | `--mode chained` |
+| memory share of the LLM loop | **0.16–0.36 %** | both modes |
+| prompt growth, documents per turn | **+25 tokens/turn** against +2,170 for full context | `--mode independent`, 40 turns |
+| token saving in that regime | **2.86×** (16,318 against 46,633 per turn) | Haiku 5.5, 40 turns |
+| accuracy on overwritten facts | **6/6** against 2/6 for full context | Haiku 5.5, 42 turns |
+| asserted a superseded value | **0/6** on both models tested | Haiku 5.5, Grok 4.6 |
+| false refusals (CIAR, below) | **0 of 264 turns** against 34 for full context | 6 runs × 44 turns |
+| Grassmannian non-unitarity | **9.9e-08 – 4.1e-07** after 19–35 writes | threshold 1e-05 |
+| engine working set | **8.6 MB** (0.064 index + 6.14 re-rank corpus + 2.36 operator) | 4,000 vectors |
+
+#### Four things this table does not say, and must not be read as saying
+
+**The 271 µs is the scan, not a search by text.** Embedding the query takes
+**60 ms** on CPU with a local MiniLM — over two hundred times the scan. The
+engine is a small fraction of retrieval and an even smaller fraction of a model
+turn, which is the honest version of "latency does not matter here": it does
+not, and that is an argument about the token bill, not about speed.
+
+**The 2.86× saving belongs to one regime.** It holds when each turn carries
+documents, where the control's context grows by ~2,170 tokens per turn. When the
+facts are single lines, the control grows by ~150–220 tokens per turn and
+**full context is the cheaper arm** — 3,799 tokens per turn against the memory
+arm's 7,335, because the memory arm spends about three model calls per turn. The
+saving is a property of how much there is to remember, not of session length.
+
+**The accuracy result is model-dependent.** On Grok 4.6 the full-context arm
+answered all six chains correctly at 42 turns with no lost-in-the-middle effect
+at all, for 5,593 tokens per turn against the memory arm's 13,275. The
+prediction that a full-context agent loses the thread by turn 15–20 held on
+neither model tested.
+
+**The 8.6 MB is the engine; the local embedder is not.** Peak RSS for the full
+stand is **2.0 GB**, almost all of it PyTorch and the sentence encoder. A
+deployment that embeds elsewhere, or uses a smaller ONNX encoder, carries the
+8.6 MB figure; a deployment that embeds locally with this encoder needs the
+2 GB. Both numbers are measured, and quoting only the first would be misleading.
+
+#### Context-Induced Alignment Refusal (CIAR)
+
+Found while trying to explain why the full-context arm kept scoring badly, and
+it is not a scoring artefact. Claude Haiku 5.5 returns `stop_reason: refusal`
+with no content on turns it answers without hesitation in isolation, once a long
+history has accumulated — **34 refusals across six control runs of 44 turns,
+12.9 %, at 6/6/5/6/3/8 per run.** They land on innocuous material: `Validator
+correction: temperature raised to 50 C`, corpus fillers, a transaction notice,
+and repeatedly on the control questions themselves. Every chain passes clean
+when tested alone, and rewriting the two whose original phrasing did trigger
+refusals **did not reduce the rate** — the worst run came after the rewrite.
+
+A refused turn silently drops the fact it was carrying, so a later question has
+nothing to answer from: in the 8-refusal run the control scored 2 of 6. Accuracy
+and refusal are not independent failures there.
+
+The memory arm refused **0 of 264 turns**, because its prompt is the current
+turn plus its tool results and no history accumulates. This is a second reason
+to keep an agent's knowledge outside the context window, independent of the
+token bill.
+
+**It is not a general property of long contexts.** The same control arm on
+Grok 4.6 produced **0 refusals**. Two models are not a survey: one family
+exhibits the effect, one does not, and that is the full width of the claim.
+
+#### Reconsolidation: non-Hermitian, and it had to be fixed to work
+
+The specified update rule was an identity. Its target was the operator's own
+output, and a Hermitian rank-one perturbation of a unitary matrix has that same
+matrix as its unitary polar factor, so the Newton-Schulz step annihilated it
+exactly: `||W - I|| = 5.4e-17` after 2,000 updates, with eighty tests passing
+throughout and none of them noticing.
+
+The target is now the **state-error vector** between successive values of one
+slot, carried by Oja's rule and projected back by Newton-Schulz. The engine's
+drift guardrail was also gated at 1e-03 and never fired across a session,
+letting non-unitarity reach 8.04e-04; the gate is now 1e-06.
+
+| | before | after |
+|---|---|---|
+| plasticity, `\|\|W - I\|\|` after 500 updates | 8.79e-07 | **3.62e-01** |
+| non-unitarity after a session of writes | 8.04e-04 | **2.5e-07** |
+
+Covered by `research/tests/test_reconsolidation_plasticity.py`, written red:
+three of its four tests failed against the specified rule.
+
+**What reconsolidation is not.** A unitary operator preserves every inner
+product, so it cannot encode "these items are related": rotating query and
+corpus together leaves the top-10 identical and the scores agreeing to 8.26e-16.
+Seven experiments measuring retrieval recall through it found nothing, which is
+the correct result. Recall belongs to the cascade. Reconsolidation holds a
+changing memory together — retention of old associations as new ones arrive,
+measured in `research/retention_experiment.py`.
+
+---
+
+### 🔍 Quick Start for Reviewers
+
+Three commands, no API key and no network access required. Tested from a clean
+checkout on Debian 12 with GCC 13 and Python 3.11.
+
+```bash
+# 1. C core: two-stage cascade, 33 assertions including mutation checks
+cd tests && make check && cd ..
+
+# 2. Python invariants: 51 tests, including plasticity and Grassmannian drift
+python3 -m pytest research/tests/ -q
+
+# 3. The reconsolidation invariants with their measured values printed
+python3 research/tests/test_reconsolidation_plasticity.py
+```
+
+Step 3 prints the figures rather than the word `passed`, and exits non-zero if
+either invariant breaks:
+
+```
+dim 64, 500 updates with an external target
+plasticity   ||W - I||      = 3.623e-01  (threshold > 5.00e-02)
+stability    ||W^H W - I||  = 4.444e-06  (threshold < 1.00e-04)
+control: target taken from the operator's own output, 200 updates
+             ||W - I||      = 8.781e-07  (inert by construction)
+```
+
+Steps 1–3 need only GCC, Python 3 and NumPy. **The agent-memory stand is not in
+this set**, because it cannot be: it calls a commercial LLM API and downloads a
+sentence encoder on first use. Its invocation is recorded in
+[`BENCHMARKS.md`](BENCHMARKS.md) together with what a reviewer can verify
+without a key.
+
+---
+
 ### ⚖️ Against the Alternatives
 
 The algorithm here is not new. Sign random projections are Charikar 2002; FAISS

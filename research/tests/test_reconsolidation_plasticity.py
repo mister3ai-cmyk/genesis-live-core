@@ -132,3 +132,31 @@ def test_self_target_is_inert_by_construction():
     assert moved < 1.0e-02, (
         "ожидалась инертность при цели из собственного выхода, получено %.3e. "
         "Если это изменилось — обновите разбор в разделе 7 сводки." % moved)
+
+
+if __name__ == "__main__":
+    # ТЗ ревьюера называет этот файл как исполняемую проверку, а pytest-модуль
+    # при прямом запуске молча завершается с кодом 0 - то есть выглядит как
+    # пройденная проверка, ничего не проверив. Поэтому здесь явный прогон с
+    # печатью самих величин: аудитору нужны числа, а не слово "passed".
+    mod, engine = fresh()
+    I = np.eye(DIM, dtype=np.complex128)
+    W = drive(engine, STEPS, external=True)
+    moved = float(np.linalg.norm(W - I, "fro"))
+    drift = float(np.linalg.norm(np.conj(W.T) @ W - I, "fro"))
+
+    mod2, inert = fresh()
+    W2 = drive(inert, 200, external=False)
+    inert_moved = float(np.linalg.norm(W2 - I, "fro"))
+
+    print("dim %d, %d updates with an external target" % (DIM, STEPS))
+    print("plasticity   ||W - I||      = %.3e  (threshold > %.2e)"
+          % (moved, MIN_PLASTICITY))
+    print("stability    ||W^H W - I||  = %.3e  (threshold < %.2e)"
+          % (drift, MAX_NON_UNITARITY))
+    print("control: target taken from the operator's own output, 200 updates")
+    print("             ||W - I||      = %.3e  (inert by construction)"
+          % inert_moved)
+    ok = moved > MIN_PLASTICITY and drift < MAX_NON_UNITARITY
+    print("RESULT: %s" % ("invariants hold" if ok else "INVARIANTS BROKEN"))
+    raise SystemExit(0 if ok else 1)
