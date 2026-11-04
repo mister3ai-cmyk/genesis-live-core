@@ -348,14 +348,15 @@ and grades the **assertion**, not the presence of a string.
 
 | | measured | where |
 |---|---|---|
-| Hamming scan + exact re-rank, 4,000 × 384-dim | **271 µs** | `--mode chained` |
+| Hamming scan + exact re-rank (`Glyphs.search`, NumPy), 4,000 × 384-dim | **271 µs** | timed apart from the memory layer; no command in this repository prints it |
+| the same inside `Memory.search`, with weights and slots | **580–605 µs** | the read line printed by `--mode independent` |
 | memory share of the LLM loop | **0.16–0.36 %** | both modes |
 | prompt growth, documents per turn | **+25 tokens/turn** against +2,170 for full context | `--mode independent`, 40 turns |
 | token saving in that regime | **2.86×** (16,318 against 46,633 per turn) | Haiku 5.5, 40 turns |
 | accuracy on overwritten facts | **6/6** against 2/6 for full context | Haiku 5.5, 42 turns |
 | asserted a superseded value | **0/6** on both models tested | Haiku 5.5, Grok 4.6 |
 | false refusals (CIAR, below) | **0 of 264 turns** against 34 for full context | 6 runs × 44 turns |
-| Grassmannian non-unitarity | **9.9e-08 – 4.1e-07** after 19–35 writes | threshold 1e-05 |
+| Grassmannian non-unitarity | **9.9e-08 – 4.1e-07** after 19–35 writes | session threshold 1e-05 |
 | engine working set | **8.6 MB** (0.064 index + 6.14 re-rank corpus + 2.36 operator) | 4,000 vectors |
 
 #### Four things this table does not say, and must not be read as saying
@@ -421,7 +422,7 @@ throughout and none of them noticing.
 The target is now the **state-error vector** between successive values of one
 slot, carried by Oja's rule and projected back by Newton-Schulz. The engine's
 drift guardrail was also gated at 1e-03 and never fired across a session,
-letting non-unitarity reach 8.04e-04; the gate is now 1e-06.
+letting non-unitarity reach 8.04e-04; the gate that triggers that step is now 1e-06.
 
 | | before | after |
 |---|---|---|

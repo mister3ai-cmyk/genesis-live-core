@@ -18,9 +18,9 @@ without demonstrating the same two numbers.
 
 Thresholds come from measurement rather than taste, and both are stated with
 their cost: in the engine, with its norm clipping and corrective step, the
-corrected rule reaches ||W - I|| = 0.360 after 500 updates while holding
-non-unitarity at 2.81e-06, against 1.76e-06 for the inert rule. Plasticity rises
-by five orders of magnitude and stability costs a factor of 1.6 - the existing
+corrected rule reaches ||W - I|| = 0.362 after 500 updates while holding
+non-unitarity at 4.44e-06, against 1.76e-06 for the inert rule. Plasticity rises
+by five orders of magnitude and stability costs a factor of 2.5 - the existing
 guardrails absorb it, which is what they were for.
 
 Run: python3 -m pytest research/tests/test_reconsolidation_plasticity.py -q
@@ -39,12 +39,12 @@ ENGINE = os.path.join(os.path.dirname(HERE), "modules",
 DIM = 64
 STEPS = 500
 
-# Измерено: исправленное правило даёт 0.83 за 500 шагов, прежнее 3.8e-03.
+# Измерено: исправленное правило даёт 0.362 за 500 шагов, прежнее 8.8e-07.
 # Порог посередине на логарифмической шкале — ловит тождество, не придирается
 # к скорости обучения.
 MIN_PLASTICITY = 0.05
-# Движок с клиппингом ||dW||_F <= 0.05 и корректирующим шагом держит 2.81e-06
-# против 1.76e-06 у инертного правила. Порог на два порядка выше измеренного:
+# Движок с клиппингом ||dW||_F <= 0.05 и корректирующим шагом держит 4.44e-06
+# против 1.76e-06 у инертного правила. Порог примерно в 20 раз выше измеренного:
 # ловит реальный уход с многообразия, не придирается к шуму.
 MAX_NON_UNITARITY = 1.0e-04
 

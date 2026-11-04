@@ -7,3 +7,9 @@ benchmarks/run_benchmark
 __pycache__/
 *.pyc
 .pytest_cache/
+tests/test_srp_lsh
+benchmarks/cold_cache
+venv/
+.venv/
+*.dylib
+*.log

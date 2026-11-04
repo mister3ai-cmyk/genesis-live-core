@@ -1,5 +1,6 @@
 #!/bin/sh
 # benchmarks/scan_sweep.sh
+# SPDX-License-Identifier: Apache-2.0
 # Where does the flat scan cross a latency budget? Sizes the L0 tier by time
 # rather than by memory. Needs cold_cache built and a large index to slice.
 #   ./scan_sweep.sh /path/to/index.bin

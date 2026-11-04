@@ -64,7 +64,7 @@ attributed to horizon alone.**
 
 | operation | cost |
 |---|---|
-| read: scan 4,000 codes + exact re-rank | 605 µs |
+| read: `Memory.search`, scan 4,000 codes + exact re-rank, weights and slots | 605 µs |
 | write: reconsolidation, dim 384 | 18.3 ms |
 | write: reconsolidation, dim 256 | 5.3 ms |
 

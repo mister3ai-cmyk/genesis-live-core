@@ -1,6 +1,6 @@
 # Benchmarks: every figure, its command, and what it does not prove
 
-**Updated 2026-11-04. 84 automated checks: 33 C assertions, 51 Python tests.
+**Updated 2026-11-05. 84 automated checks: 33 C assertions, 51 Python tests.
 Measurement host for every figure below: shared Contabo VPS, AMD EPYC (with
 IBPB), 6 vCPU, 11 GB RAM, Debian 12, GCC 13.3, Python 3.11, single core unless
 stated.**
@@ -27,7 +27,7 @@ python3 research/tests/test_reconsolidation_plasticity.py    # prints the values
 | C core assertions | 33 checks, 0 failures | `cd tests && make check` |
 | Python tests | 51 passed | `python3 -m pytest research/tests/ -q` |
 | plasticity, `\|\|W - I\|\|` after 500 updates | 3.62e-01 (threshold > 5e-02) | step 3 above |
-| non-unitarity, `\|\|W^H W - I\|\|` | 4.44e-06 (threshold < 1e-04) | step 3 above |
+| non-unitarity, `\|\|W^H W - I\|\|` | 4.44e-06 after 500 random updates, dim 64 (stress-test threshold < 1e-04) | step 3 above |
 | inert control (target = own output) | 8.78e-07 after 200 updates | step 3 above |
 | static cascade: recall 10@10 | 88.0 % at 6,300–6,900 QPS/core | `cd benchmarks && make && ./run_benchmark` |
 | index footprint | 0.80 MB against 102.4 MB float32 (128×) | same |
@@ -85,8 +85,8 @@ correctness on Haiku and on refusal resistance on both, not on cost.
 
 | | value |
 |---|---|
-| Hamming scan + exact re-rank, 4,000 × 384-dim | **271 µs** |
-| the same through the Python memory layer | 580–605 µs |
+| Hamming scan + exact re-rank (`Glyphs.search`, NumPy), 4,000 × 384-dim | **271 µs** |
+| the same inside `Memory.search`, with weights and slots | 580–605 µs |
 | embedding the query, MiniLM on CPU | **60,000 µs** |
 | memory share of the LLM loop | 0.16–0.36 % |
 

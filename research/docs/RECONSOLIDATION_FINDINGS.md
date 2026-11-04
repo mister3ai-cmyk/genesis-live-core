@@ -34,9 +34,9 @@ learns, Newton-Schulz cleans up, in that order.
 | | `\|\|W - I\|\|` | non-unitarity |
 |---|---|---|
 | no target (previous path, kept) | 8.79e-07 | 1.76e-06 |
-| external target | **3.60e-01** | 2.81e-06 |
+| external target | **3.62e-01** | 4.44e-06 |
 
-Plasticity rises by five orders of magnitude; stability costs a factor of 1.6,
+Plasticity rises by five orders of magnitude; stability costs a factor of 2.5,
 absorbed by the existing norm clipping and corrective step.
 
 Covered by `research/tests/test_reconsolidation_plasticity.py`, written red:
