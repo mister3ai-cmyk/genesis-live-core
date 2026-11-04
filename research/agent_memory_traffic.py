@@ -738,6 +738,77 @@ def judge(answer, fresh, stale):
     return len(got) == len(fresh), got, leaked
 
 
+JUDGE_SYSTEM = (
+    "You grade one answer from an agent that was asked about facts which were "
+    "revised during a session. You are given the values that are current and "
+    "the values that were superseded. Decide what the answer ASSERTS as being "
+    "the case now.\n\n"
+    "Return JSON only, no prose:\n"
+    '{"verdict": "correct" | "stale_asserted" | "wrong" | "refusal",\n'
+    ' "cites_history": true | false,\n'
+    ' "reason": "<one short sentence>"}\n\n'
+    "correct         - asserts every current value, and nothing superseded is "
+    "put forward as current\n"
+    "stale_asserted  - puts a superseded value forward as the current one\n"
+    "wrong           - neither: a value that is in neither list, a missing "
+    "value, or a refusal to answer on policy grounds while still trying\n"
+    "refusal         - empty, or declines entirely without attempting the task\n"
+    "cites_history   - mentions a superseded value AS superseded, history or "
+    "context. That is correct behaviour and must NOT make the verdict "
+    "stale_asserted.\n\n"
+    "A value named inside a denial ('do not confuse it with 0.45') is not "
+    "asserted. Judge the assertion, not the presence of a string.")
+
+
+def _parse_json(txt):
+    """Ответ арбитра может быть обрезан по лимиту или обёрнут в прозу.
+    Берём самый длинный разбираемый фрагмент, а не первый попавшийся."""
+    starts = [i for i, c in enumerate(txt) if c == "{"]
+    ends = [i for i, c in enumerate(txt) if c == "}"]
+    for a in starts:
+        for b in sorted(ends, reverse=True):
+            if b > a:
+                try:
+                    return json.loads(txt[a:b + 1])
+                except ValueError:
+                    continue
+    return None
+
+
+def judge_llm(client, model, answer, fresh, stale, question):
+    """Нейронный арбитр вместо подстрочного поиска.
+
+    Подстроки врут в обе стороны, и это измерено: ответ "Temperature: 50 C,
+    this supersedes the earlier baseline of 42 C" попадал в утечки, хотя он
+    образцовый, а ответ "H3K9ac: 0.35. Don't confuse it with the 0.45 stored
+    for the auto-degron term" зачитывался верным, потому что строка 0.45 в
+    тексте была - внутри отрицания. Настоящая точность была 4 из 6, а не 5.
+    """
+    if not (answer or "").strip():
+        return {"verdict": "refusal", "cites_history": False,
+                "reason": "пустой ответ"}
+    payload = json.dumps({"question": question,
+                          "current_values": fresh,
+                          "superseded_values": stale,
+                          "answer": answer[:3000]}, ensure_ascii=False)
+    for attempt in range(3):
+        try:
+            r = client.messages.create(
+                model=model, max_tokens=600, system=JUDGE_SYSTEM,
+                messages=[{"role": "user", "content": payload}])
+            txt = " ".join(b.text for b in r.content if b.type == "text")
+            out = _parse_json(txt)
+            if out and out.get("verdict") in ("correct", "stale_asserted",
+                                              "wrong", "refusal"):
+                return out
+        except Exception as e:                      # noqa: BLE001
+            if attempt == 2:
+                return {"verdict": "wrong", "cites_history": False,
+                        "reason": "арбитр недоступен: %s" % e}
+    return {"verdict": "wrong", "cites_history": False,
+            "reason": "арбитр не вернул разбираемый JSON"}
+
+
 SYSTEM_CHAIN_MEM = (
     "You are an agent whose knowledge lives in an external memory, not in your "
     "context. Earlier turns are NOT kept in your context. When you are given a "
@@ -752,7 +823,8 @@ SYSTEM_CHAIN_FULL = (
     "with the most recent version and do not report superseded values.")
 
 
-def run_chained(client, model, schedule, mem, max_steps=7, arm="memory"):
+def run_chained(client, model, schedule, mem, max_steps=7, arm="memory",
+                judge_client=None, judge_model="claude-haiku-5-5"):
     stats = dict(calls=0, tin=0, tout=0, model_time=0.0, turn_tokens=[],
                  probes=0, correct=0, stale_leaks=0, detail=[])
     msgs = []
@@ -807,14 +879,19 @@ def run_chained(client, model, schedule, mem, max_steps=7, arm="memory"):
         if kind == "probe":
             ok, got, leaked = judge(answer, fresh, stale)
             stats["probes"] += 1
-            stats["correct"] += 1 if ok else 0
-            stats["stale_leaks"] += 1 if leaked else 0
-            stats["strict"] = stats.get("strict", 0) + (1 if ok and not leaked
-                                                        else 0)
-            stats["detail"].append((name, ok, got, leaked))
+            stats["substr_correct"] = stats.get("substr_correct", 0) + int(ok)
+            v = judge_llm(judge_client or client, judge_model, answer, fresh,
+                          stale, text)
+            stats[v["verdict"]] = stats.get(v["verdict"], 0) + 1
+            if v.get("cites_history"):
+                stats["cites_history"] = stats.get("cites_history", 0) + 1
+            stats["detail"].append((name, v["verdict"], v.get("cites_history"),
+                                    v.get("reason", "")))
             stats.setdefault("answers", []).append(
-                {"chain": name, "ok": ok, "fresh_found": got, "stale": leaked,
-                 "answer": answer})
+                {"chain": name, "verdict": v["verdict"],
+                 "cites_history": v.get("cites_history"),
+                 "reason": v.get("reason"), "substring_ok": ok,
+                 "substring_leaked": leaked, "answer": answer})
     return stats
 
 
@@ -837,26 +914,29 @@ def report_chained(label, s):
     print("токенов на ход            : %.0f" % (np.sum(tt) / len(tt)))
     print("первая половина / вторая  : %.0f / %.0f  (наклон %+.0f на ход)"
           % (a, b, (b - a) / half))
-    print("точность по перезаписи    : %d/%d  (%.0f %%)"
-          % (s["correct"], s["probes"],
-             100.0 * s["correct"] / max(s["probes"], 1)))
-    print("выдал устаревший факт     : %d/%d  (%.0f %%)"
-          % (s["stale_leaks"], s["probes"],
-             100.0 * s["stale_leaks"] / max(s["probes"], 1)))
-    if s.get("refusals"):
-        print("ОТКАЗОВ МОДЕЛИ            : %d  (ходы без ответа; "
-              "цифры ниже читать с этой поправкой)" % s["refusals"])
-        for kind, nm, txt in s.get("refused_on", []):
-            print("    отказ на %-11s %s | %s" % (kind, nm, txt))
-    print("строго: верно и без старого: %d/%d  (%.0f %%)"
-          % (s.get("strict", 0), s["probes"],
-             100.0 * s.get("strict", 0) / max(s["probes"], 1)))
-    print("  (строка про устаревший факт - lost-in-the-middle: свежая версия "
-          "была доступна, но в ответе всплыла отменённая)")
-    for name, ok, got, leaked in s["detail"]:
-        print("    %-34s %s  нашёл %s%s"
-              % (name[:34], "верно" if ok else "НЕВЕРНО", got or "-",
-                 ("  утечка " + str(leaked)) if leaked else ""))
+    pr = max(s["probes"], 1)
+    print("--- арбитр (разбирает утверждение, не подстроку) ---")
+    print("верно                     : %d/%d  (%.0f %%)"
+          % (s.get("correct", 0), s["probes"], 100.0 * s.get("correct", 0) / pr))
+    print("утверждал отменённое      : %d/%d  (%.0f %%)"
+          % (s.get("stale_asserted", 0), s["probes"],
+             100.0 * s.get("stale_asserted", 0) / pr))
+    print("иначе неверно             : %d/%d" % (s.get("wrong", 0), s["probes"]))
+    print("отказ на вопросе          : %d/%d" % (s.get("refusal", 0), s["probes"]))
+    print("из верных сослались на историю: %d  (это правильное поведение)"
+          % s.get("cites_history", 0))
+    print("для сравнения, подстрочный зачёт: %d/%d"
+          % (s.get("substr_correct", 0), s["probes"]))
+    rt = len(s["turn_tokens"])
+    print("--- устойчивость к отказам ---")
+    print("ложных отказов            : %d на %d ходов  (%.1f %%)"
+          % (s.get("refusals", 0), rt, 100.0 * s.get("refusals", 0) / max(rt, 1)))
+    for kind, nm, txt in s.get("refused_on", []):
+        print("    отказ на %-11s %s | %s" % (kind, nm, txt[:60]))
+    for name, verdict, hist, reason in s["detail"]:
+        print("    %-34s %-15s %s%s"
+              % (name[:34], verdict,
+                 "(+история) " if hist else "", reason[:60]))
 
 
 # --- ветки ----------------------------------------------------------------
@@ -994,6 +1074,8 @@ def main():
                          "затем отменяется, спрашивают позже. Мерит пользу "
                          "записи, а не только цену извлечения")
     ap.add_argument("--steps", type=int, help="синоним --turns")
+    ap.add_argument("--judge-model", default="claude-haiku-5-5",
+                    help="арбитр, разбирающий утверждения в ответах")
     ap.add_argument("--tau", type=float, default=12.0,
                     help="постоянная затухания в ходах: score *= "
                          "exp(-dt/tau)")
@@ -1017,6 +1099,21 @@ def main():
     else:
         from openai import OpenAI
         client = OpenAIAdapter(OpenAI(api_key=key, base_url=args.base_url))
+
+    # Арбитр всегда Anthropic и всегда один и тот же, независимо от того, какую
+    # модель мы замеряем: иначе прогон на Grok судил бы сам Grok, и сравнение
+    # двух моделей перестало бы быть сравнением. Оговорка: арбитр того же
+    # семейства, что одна из подопытных моделей, и к себе может быть мягче.
+    judge_client = None
+    if args.mode == "chained":
+        jkey = os.environ.get("ANTHROPIC_API_KEY", "")
+        if args.provider == "anthropic":
+            judge_client = client
+        elif jkey:
+            import anthropic
+            judge_client = anthropic.Anthropic(api_key=jkey)
+        else:
+            sys.exit("арбитру нужен ANTHROPIC_API_KEY в окружении")
 
     print("собираю закрытый корпус из %s..." % ", ".join(args.roots))
     chunks = collect_chunks(args.roots, args.corpus)
@@ -1045,7 +1142,9 @@ def main():
             eng = load_engine(vecs.shape[1])
             mem = Memory(Glyphs(vecs.copy(), list(chunks)), encoder, eng,
                          tau=args.tau)
-            s = run_chained(client, args.model, sched, mem, arm="memory")
+            s = run_chained(client, args.model, sched, mem, arm="memory",
+                            judge_client=judge_client,
+                            judge_model=args.judge_model)
             report_chained("цепочки: память L0", s)
             dump_answers("/tmp/answers_memory.json", "memory", s)
             ops = mem.reads + mem.writes
@@ -1070,7 +1169,9 @@ def main():
             res["memory"] = s
         if args.arm in ("full", "both"):
             mem2 = Memory(Glyphs(vecs.copy(), list(chunks)), encoder, None)
-            s = run_chained(client, args.model, sched, mem2, arm="full")
+            s = run_chained(client, args.model, sched, mem2, arm="full",
+                            judge_client=judge_client,
+                            judge_model=args.judge_model)
             report_chained("цепочки: full-context (контроль)", s)
             res["full"] = s
         if len(res) == 2:
@@ -1080,12 +1181,15 @@ def main():
             print("\n=== итог по цепочкам ===")
             print("токенов на ход            : память %.0f, контроль %.0f  "
                   "(%.2f×)" % (mt, ft, ft / max(mt, 1)))
-            print("точность по перезаписи    : память %.0f %%, контроль %.0f %%"
-                  % (100.0 * m["correct"] / max(m["probes"], 1),
-                     100.0 * f["correct"] / max(f["probes"], 1)))
-            print("устаревший факт в ответе  : память %.0f %%, контроль %.0f %%"
-                  % (100.0 * m["stale_leaks"] / max(m["probes"], 1),
-                     100.0 * f["stale_leaks"] / max(f["probes"], 1)))
+            print("верно по арбитру          : память %.0f %%, контроль %.0f %%"
+                  % (100.0 * m.get("correct", 0) / max(m["probes"], 1),
+                     100.0 * f.get("correct", 0) / max(f["probes"], 1)))
+            print("утверждал отменённое      : память %.0f %%, контроль %.0f %%"
+                  % (100.0 * m.get("stale_asserted", 0) / max(m["probes"], 1),
+                     100.0 * f.get("stale_asserted", 0) / max(f["probes"], 1)))
+            print("ложных отказов на ход     : память %.1f %%, контроль %.1f %%"
+                  % (100.0 * m.get("refusals", 0) / max(len(m["turn_tokens"]), 1),
+                     100.0 * f.get("refusals", 0) / max(len(f["turn_tokens"]), 1)))
         return
     print("задач построено: %d (запрос - начало фрагмента, проверка - по хвосту)"
           % len(tasks))

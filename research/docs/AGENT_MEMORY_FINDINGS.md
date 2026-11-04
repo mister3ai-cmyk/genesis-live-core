@@ -332,6 +332,71 @@ carries no history, sees none. Until this is understood, the control arm's
 accuracy cannot be compared with anything.
 
 
+### Scoring the assertion, not the string
+
+Substring scoring was wrong in both directions, and two answers show why: one
+that reads "Temperature: 50 °C, superseding the earlier baseline of 42 °C" was
+counted as a leak though it is exactly the wanted behaviour, and one that reads
+"H3K9ac: 0.35. Do not confuse it with the 0.45 stored for the auto-degron term"
+was counted as correct though it asserts the superseded figure — 0.45 appeared
+in the text, inside a denial.
+
+A judge model now reads each answer against the current and superseded values
+and returns one of four verdicts: `correct`, `stale_asserted`, `wrong`,
+`refusal`, plus a `cites_history` flag, since naming a superseded value **as**
+superseded is correct and must not be punished. The judge is always Anthropic
+and always the same model regardless of which model is under test, so a Grok run
+is not graded by Grok. It reproduced all five reference verdicts identically on
+two consecutive passes. Caveat worth stating: the judge is from the same family
+as one of the models under test and may be the gentler reader of its own
+output.
+
+### Result, Haiku 5.5, 42 turns, judged
+
+| | memory L0 | full context |
+|---|---|---|
+| correct | **4/6 (67 %)** | 3/6 (50 %) |
+| asserted a superseded value | **1/6 (17 %)** | 2/6 (33 %) |
+| otherwise wrong | 1/6 | 0/6 |
+| refused the question | **0/6** | 1/6 |
+| cited history while correct | 2 | 2 |
+| tokens per turn | 7,558 | 3,894 |
+
+The honest accuracy is 67 %, not the 83 % the substring metric reported in
+earlier runs. The memory arm still leads on both correctness and on asserting
+stale values, and the gap is smaller and believable.
+
+Its two failures are real. One is the Zero-PII chain, where it produced neither
+the anonymous identifier nor a refusal. The other is the Waddington chain, where
+`auto-degron term` reads as its own entity, so the turn-24 update landed in a
+different slot from the turn-14 state — a defect in the chain's wording, which
+came from clearing refusals and traded one artefact for another.
+
+### Refusal resistance: 0 % against 11.8 %
+
+Rewording the sensitive chains did not stop the control arm refusing. Across
+five runs of 44 turns each:
+
+| | refusals | rate |
+|---|---|---|
+| memory L0 | **0 of 220 turns** | 0.0 % |
+| full context | 26 of 220 turns | 11.8 % |
+
+Per run the control produced 6, 6, 5, 6 and 3. They land on innocuous material —
+`Validator correction: temperature raised to 50 C`, corpus fillers, and twice on
+a control question itself — so the trigger is not the wording of any one chain.
+With a long accumulated history the model begins declining turns it answers
+without hesitation in isolation, and a refused turn silently removes a fact that
+a later question depends on.
+
+The memory arm never refuses because it never carries that history: its prompt
+is the current turn and its tool results. **This is a second, independent reason
+to keep the agent's knowledge outside the context window, and unlike the token
+saving it does not depend on how much there is to remember.** It is also the
+one finding here that favours the architecture without qualification — though
+it is a property of this model's behaviour on long contexts, not a theorem, and
+it should be re-measured on other models before being quoted as general.
+
 ## 6. Two defects found in this stand, and fixed
 
 **The search ignored the query.** The first version hashed the query text to a
