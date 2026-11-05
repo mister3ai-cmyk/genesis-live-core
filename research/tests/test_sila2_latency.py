@@ -1,9 +1,16 @@
-"""
-test_sila2_latency.py — Hardware SLA validation
-Covers:
-  - Hamilton STARlet p99 < 50 ms, mean < 20 ms, compliance_ok == True
-  - Waters UPLC Merkle root stability and peak validity
-  - EMCCD incremental Merkle proof round-trip (leaf → root)
+"""ВНИМАНИЕ: это SLA поверх заглушки, а не замер прибора.
+
+Драйвер Hamilton STARlet в research/sila2_bridge/hamilton_starlet_driver.py
+не разговаривает ни с прибором, ни с gRPC: он делает
+
+    simulated_ms = np.random.uniform(2.0, 8.0)
+    time.sleep(simulated_ms / 1000.0)
+
+поэтому проверка "p99 < 50 мс" выполняется по построению и упасть не может.
+Ни один прибор при этих тестах не присутствовал.
+
+Помечено concept и исключено из счёта проверок движка. Чтобы это стало
+замером, нужен либо настоящий прибор, либо запись его трафика.
 """
 import hashlib
 import sys
@@ -11,6 +18,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
+
+pytestmark = pytest.mark.concept
 from sila2_bridge.hamilton_starlet_driver import (
     HamiltonSTARletDriver, PipetteCommand, WellAddress, PlateFormat,
     P99_LATENCY_MS,

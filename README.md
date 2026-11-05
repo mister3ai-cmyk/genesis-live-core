@@ -87,7 +87,7 @@ with no extra flags reproduces the headline figures.
 
 | Figure | Command |
 |---|---|
-| 0.80 MB index, 128x compression, Recall 88.0 %, 105 us p50, 285 ns handoff | `make && ./run_benchmark` |
+| 0.80 MB index, 128x compression, Recall 88.0 %, query p50 139–147 us, handoff p50 30–290 ns | `make && ./run_benchmark` |
 | Recall on real OpenAI embeddings, up to 90.6 % | `python3 eval_real_embeddings.py` (downloads ~300 MB) |
 | vs faiss and hnswlib, 89.4 % at 33k | `python3 compare_engines.py --n 33234` |
 | Crossover with hnswlib at 50-70k | same, with `--n 50000`, `--n 70000` |
@@ -471,8 +471,8 @@ checkout on Debian 12 with GCC 13 and Python 3.11.
 # 1. C core: two-stage cascade, 33 assertions including mutation checks
 cd tests && make check && cd ..
 
-# 2. Python invariants: 51 tests, including plasticity and Grassmannian drift
-python3 -m pytest research/tests/ -q
+# 2. Python invariants about the engine: 4 tests (plasticity, Grassmannian drift)
+python3 -m pytest -m product research/tests/ -q
 
 # 3. The reconsolidation invariants with their measured values printed
 python3 research/tests/test_reconsolidation_plasticity.py
@@ -488,6 +488,12 @@ stability    ||W^H W - I||  = 4.444e-06  (threshold < 1.00e-04)
 control: target taken from the operator's own output, 200 updates
              ||W - I||      = 8.781e-07  (inert by construction)
 ```
+
+`python3 -m pytest research/tests/` without `-m product` runs 51 tests, but only
+these 4 and the 33 C assertions are evidence about the engine: the rest are
+models, contract economics and instrument stubs, and 21 of them cannot fail by
+construction. [`BENCHMARKS.md` §1.1](BENCHMARKS.md) names each file and what it
+actually asserts — an external reviewer found this, we had been quoting 51.
 
 Steps 1–3 need only GCC, Python 3 and NumPy. **The agent-memory stand is not in
 this set**, because it cannot be: it calls a commercial LLM API and downloads a

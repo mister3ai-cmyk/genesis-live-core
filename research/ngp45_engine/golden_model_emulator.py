@@ -1,5 +1,9 @@
 """
-NGP 4.5 — Golden Model Emulator (CPU / AVX-512 reference)
+NGP 4.5 - Golden Model Emulator (CPU reference)
+
+Note: the build targets AVX2 + POPCNT. AVX-512 is a planned ISA path
+(NLnet milestone 1), not something measured here - the earlier AVX-512
+wording in this header described an intention as a property.
 Emulates the TFLN photonic MZI mesh in software to generate golden reference
 vectors for calibrating the hardware chip before and after tape-out.
 

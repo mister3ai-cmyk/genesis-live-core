@@ -15,6 +15,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
 
+# Экономика контрактов, не векторный движок: помечено concept,
+# чтобы не попадать в счёт проверок продукта.
+pytestmark = pytest.mark.concept
+
 
 # ── Pure-Python simulation of GCBI engine + verifier logic ───────────────────
 

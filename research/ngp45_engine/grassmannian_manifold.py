@@ -1,7 +1,9 @@
 """
 NGP 4.5 — Grassmannian Manifold Projection
 G(4, C^64): real dimension = 2 * 4 * (64 - 4) = 480
-Aligned to 512-dim SIMD cache-line boundary for AVX-512 / TFLN mesh.
+Aligned to a 512-dim SIMD cache-line boundary. The alignment is useful on
+AVX2, which is what the build targets; AVX-512 is a planned path, not a
+measured one.
 
 Reference: LNOI-WDM-DISPATCHER-v1.0, Zenodo 10.5281/zenodo.22884782
 """
@@ -16,7 +18,7 @@ from typing import Tuple
 K: int = 4          # subspace rank
 N: int = 64         # ambient complex dimension
 DIM_R: int = 2 * K * (N - K)   # = 480  real dimension of G(k, C^n)
-SIMD_PAD: int = 512             # AVX-512 / TFLN cache-line boundary
+SIMD_PAD: int = 512             # SIMD cache-line boundary (AVX2 build)
 
 
 # ── Core types ────────────────────────────────────────────────────────────────

@@ -18,14 +18,14 @@ NumPy, nothing else.
 
 ```bash
 cd tests && make check && cd ..                              # 33 assertions
-python3 -m pytest research/tests/ -q                         # 51 tests
+python3 -m pytest -m product research/tests/ -q               # 4 engine tests
 python3 research/tests/test_reconsolidation_plasticity.py    # prints the values
 ```
 
 | figure | value | command |
 |---|---|---|
 | C core assertions | 33 checks, 0 failures | `cd tests && make check` |
-| Python tests | 51 passed | `python3 -m pytest research/tests/ -q` |
+| Python tests about the engine | 4 passed, 47 deselected | `python3 -m pytest -m product research/tests/ -q` |
 | plasticity, `\|\|W - I\|\|` after 500 updates | 3.62e-01 (threshold > 5e-02) | step 3 above |
 | non-unitarity, `\|\|W^H W - I\|\|` | 4.44e-06 after 500 random updates, dim 64 (stress-test threshold < 1e-04) | step 3 above |
 | inert control (target = own output) | 8.78e-07 after 200 updates | step 3 above |
@@ -36,6 +36,29 @@ python3 research/tests/test_reconsolidation_plasticity.py    # prints the values
 
 The two mutation checks matter more than the count: flipping `>=` to `>` in
 `srp_encode` and corrupting the accumulator in `srp_dot` are both caught.
+
+### 1.1 Why the Python count dropped from 51 to 4
+
+An external reviewer cloned the repository, ran everything, and read what the
+tests assert rather than counting them. The finding is correct and is the ninth
+withdrawn claim in this file: **"51 tests" counted work that says nothing about
+the product, and 21 of those tests cannot fail.**
+
+| file | tests | what it actually checks | marker |
+|---|---|---|---|
+| `test_reconsolidation_plasticity.py` | 4 | the reconsolidation operator: plasticity and Grassmannian drift | `product` |
+| `test_vectors_abc_coherence.py` | 6 | **nothing.** Assigns a literal and compares it to the same literal: `gamow_screening_kev = 1.21; assert gamow_screening_kev == 1.21` | `concept` |
+| `test_sila2_latency.py` | 15 | an SLA over a stub. The Hamilton driver runs `time.sleep(np.random.uniform(2, 8) / 1000)`, so "p99 < 50 ms" holds by construction. No instrument was present | `concept` |
+| `test_gcbi_oracle_defense.py`, `test_rollover_flywheel.py` | 26 | contract economics — escrow, oracle defence, a 10/20/70 split. Honest logic, unrelated to agent memory | `concept` |
+
+The two `concept` files that cannot fail now say so in their own docstrings,
+in place of the headline they used to carry. Nothing was deleted: the constants
+and the economic models have their own purpose. They are simply not evidence,
+and the counter no longer pretends otherwise.
+
+`python3 -m pytest -m product` is now the number to quote. `python3 -m pytest`
+still runs all 51 and will say `4 passed, 47 deselected` for the first form,
+which is the honest shape of the claim.
 
 ## 2. Requires an LLM API key
 
@@ -122,6 +145,7 @@ numbers.
 | AVX-512 POPCNT | the build uses AVX2 |
 | 83 % accuracy on overwritten facts | substring scoring; 67 % when the assertion is judged, and both of the two failures were real |
 | non-unitarity ≤ 9.85e-08 | the best single run; the honest range is 9.9e-08 – 4.1e-07 |
+| 51 Python tests | 4 of them test the engine; 21 cannot fail. Found by an external reviewer, not by us — see §1.1 |
 
 ## 4. What is not measured
 

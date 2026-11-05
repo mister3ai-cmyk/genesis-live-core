@@ -36,6 +36,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(os.path.dirname(HERE), "modules",
                       "ngp46_reconsolidation_engine.py")
 
+pytestmark = pytest.mark.product
+
 DIM = 64
 STEPS = 500
 
