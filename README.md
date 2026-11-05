@@ -11,6 +11,26 @@ Two figures, kept apart because they are often conflated: the **cross-process ha
 
 Every number here was measured on a **virtualised shared host** and describes typical, not worst-case, behaviour. No real-time or determinism guarantee is claimed, and no such measurement has been performed — see [Measurement caveat](#-measurement-caveat).
 
+### Two engines in this repository
+
+| | what it does | start here |
+|---|---|---|
+| **Static index** (`src/`, `benchmarks/`, Apache-2.0) | build a corpus once, query it: SRP-LSH scan + exact re-rank, no syscalls on the query path | [10-second benchmark](#-10-second-reproducible-benchmark) |
+| **Dynamic swarm memory** (`research/`, BSL 1.1) | an agent that stores facts, revises them, and is asked twenty turns later | [Dynamic Swarm Memory](#-dynamic-swarm-memory-ngp-46-what-an-agents-turn-costs) |
+
+The second part is newer and is where the measurements are most uncomfortable,
+so they are stated in full: **6/6 correct on revised facts against 2/6 for a
+full-context agent**, **0 false refusals in 264 turns against 34**, and
+**2.86× fewer tokens per turn** where each turn carries documents — alongside
+the regimes where a full-context agent is simply **cheaper and equally correct**,
+and a cross-model check showing one of our headline effects does **not**
+generalise beyond one model family.
+
+Reviewers and auditors: [**BENCHMARKS.md**](BENCHMARKS.md) lists every figure
+with the command that produces it, the figures we have **withdrawn** and why,
+and what is **not measured**. Three commands verify the core offline — see
+[Quick Start for Reviewers](#-quick-start-for-reviewers).
+
 ---
 
 ### ⚡ 10-Second Reproducible Benchmark

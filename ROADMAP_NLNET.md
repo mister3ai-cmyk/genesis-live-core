@@ -9,6 +9,46 @@ Baseline figures come from the measurements published in [README.md](README.md):
 
 ---
 
+## Work completed since submission, unfunded
+
+Added 2026-11-05. None of this was part of the proposal and none of it is
+claimed against its hours; it is recorded because a reviewer checking the
+repository will find it and should know where it came from.
+
+**Dynamic agent memory, measured against the obvious alternative.** A stand that
+runs a real agent over 40+ linked turns with a retrieval tool and a write tool,
+against a control that keeps the whole history in its prompt. Closed corpus of
+this project's own documentation, so the model cannot answer from training data.
+Both arms graded by a separate judge model that reads the assertion rather than
+matching substrings. Code: `research/agent_memory_traffic.py`. Findings:
+[`research/docs/AGENT_MEMORY_FINDINGS.md`](research/docs/AGENT_MEMORY_FINDINGS.md).
+
+**Reconsolidation made non-inert.** The specified update rule was an identity —
+its target was the operator's own output, which a Newton-Schulz projection
+annihilates exactly: `||W - I|| = 5.4e-17` after 2,000 updates, with eighty
+tests passing and none of them noticing. The target is now a state-error vector
+carried by Oja's rule; plasticity rose from 8.79e-07 to 3.62e-01 with
+non-unitarity at 2.5e-07. Covered by four regression tests written red.
+
+**A result we did not expect and did not bury.** Claude Haiku 5.5 begins
+refusing innocuous turns once a long history accumulates in its context — 34
+refusals in 264 control turns, 12.9 %, against 0 for the memory arm, which
+carries no history. Checked on a second model family: Grok 4.6 shows none, so
+the effect is specific and is stated at that width. The same cross-model check
+also showed a full-context agent answering every chain correctly at 42 turns,
+which is a result against our own architecture and is published as such.
+
+**Audit groundwork.** [`BENCHMARKS.md`](BENCHMARKS.md) now names the command
+behind each figure, lists the figures withdrawn after re-measurement — including
+a 67× memory advantage that was an accounting error and a 31 ns latency that was
+a unittest runtime — and lists what is not measured at all. Eight such
+corrections are recorded. The reviewer quick start is three commands needing
+only GCC, Python and NumPy: 33 C assertions, 51 Python tests, and the
+reconsolidation invariants printing their measured values.
+
+This does not change the milestones below, which remain the proposal as
+submitted.
+
 ## Milestone 1: Core Engine Optimization & AVX-512 SIMD Primitives
 
 **€14,000 · ~200 hours**
