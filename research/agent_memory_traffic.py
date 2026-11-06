@@ -239,6 +239,29 @@ def load_engine(dim):
         dim=dim, estimator=mod.HeuristicBurstEstimator())
 
 
+def _norm_name(s):
+    s = re.sub(r"[_\-.]", " ", s.lower())
+    s = re.sub(r"\b(the|a|an)\b", " ", s)
+    return " ".join(s.split())
+
+
+def _same_name(a, b):
+    """Одно имя в разных написаниях: cooling_loop / cooling loop, flowrate /
+    flow rate, loop / cooling loop (слова одного входят в другое), temp /
+    temperature (префикс от 4 букв). Синонимы без общих слов (fw / firmware)
+    сюда не попадают - их ловит только порог по эмбеддингу."""
+    a, b = _norm_name(a), _norm_name(b)
+    if not a or not b:
+        return False
+    if a == b or a.replace(" ", "") == b.replace(" ", ""):
+        return True
+    ta, tb = set(a.split()), set(b.split())
+    if ta <= tb or tb <= ta:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    return len(short) >= 4 and " " not in short and long_.startswith(short)
+
+
 class Memory:
     """Память с атомарными слотами и стрелой времени.
 
@@ -271,7 +294,13 @@ class Memory:
     # слотов и вытеснение сработало 3 раза, потому что один и тот же контур
     # приходил как loop, cooling_loop и synthesis_loop. Замерено на этих
     # именах: та же сущность 0.504 и выше, разные 0.293 и ниже.
-    ENTITY_MATCH = 0.45
+    # На 20 сущностях operator_search_experiment.py граница не держится:
+    # разные сущности дают до 0.559 (fermenter / bakery oven), и при 0.45
+    # первая запись "water tank" уходила в слот aquarium навсегда. При 0.60
+    # ложных слияний сущностей ноль; написания одного имени (loop / cooling_loop)
+    # ловит лексическое сравнение _same_name до эмбеддинга. Цена: пара
+    # cooling_loop / synthesis_loop (0.504) по смыслу больше не сводится.
+    ENTITY_MATCH = 0.60
     NOTE_QUOTA = 3          # сколько мест в выдаче держим за своими записями
 
     def __init__(self, glyphs, encoder, engine, tau=12.0):
@@ -355,25 +384,34 @@ class Memory:
         противоречие."""
         if (entity, attribute) in self.slots:
             return self.slots[(entity, attribute)], attribute, entity
-        ev = self._attr_vec(entity)
-        kin = set()
-        for (ent, _), idx in self.slots.items():
-            if ent == entity or float(self._attr_vec(ent) @ ev) >= self.ENTITY_MATCH:
-                kin.add(ent)
+        # Обход в отсортированном порядке: перебор множества строк зависел от
+        # PYTHONHASHSEED, и пограничная запись попадала в разные слоты от
+        # процесса к процессу (seed 6: 154/155/156 вытеснений).
+        items = sorted(self.slots.items())
+        ents = sorted({ent for (ent, _), _ in items})
+        # Сначала написание, потом смысл: эмбеддинг коротких имён их не
+        # разделяет ("flow rate" / "flowrate" 0.286, "temperature" / "humidity"
+        # 0.651), а лексическое сравнение не путает разные слова.
+        kin = {ent for ent in ents if _same_name(ent, entity)}
+        if not kin:
+            ev = self._attr_vec(entity)
+            kin = {ent for ent in ents
+                   if float(self._attr_vec(ent) @ ev) >= self.ENTITY_MATCH}
         av = self._attr_vec(attribute)
         best, best_sim = None, 0.0
-        for (ent, attr), idx in self.slots.items():
+        for (ent, attr), idx in items:
             if ent not in kin or self.meta[idx]["deprecated"]:
                 continue
-            sim = float(self._attr_vec(attr) @ av)
+            sim = (1.0 if _same_name(attr, attribute)
+                   else float(self._attr_vec(attr) @ av))
             if sim >= self.ATTR_MATCH and sim > best_sim:
                 best, best_sim = (ent, attr), sim
         if best is not None:
             self.merged_attrs += 1
             return self.slots[best], best[1], best[0]
         # сущность опознана, атрибут новый: канон имени сущности всё равно берём
-        canon = next(iter(kin - {entity}), entity) if kin - {entity} else entity
-        return None, attribute, canon
+        others = sorted(kin - {entity})
+        return None, attribute, (others[0] if others else entity)
 
     def write(self, note, entity=None, attribute=None, value=None):
         """Записывает триплет и консолидирует его. Чтение консолидации не

@@ -16,7 +16,7 @@ Every number here was measured on a **virtualised shared host** and describes ty
 | | what it does | start here |
 |---|---|---|
 | **Static index** (`src/`, `benchmarks/`, Apache-2.0) | build a corpus once, query it: SRP-LSH scan + exact re-rank, no syscalls on the query path | [10-second benchmark](#-10-second-reproducible-benchmark) |
-| **Dynamic swarm memory** (`research/`, BSL 1.1) | an agent that stores facts, revises them, and is asked twenty turns later | [Dynamic Swarm Memory](#-dynamic-swarm-memory-ngp-46-what-an-agents-turn-costs) |
+| **Dynamic swarm memory** (`research/`, BSL 1.1) | an agent that stores facts, revises them, and is asked twenty turns later | [Dynamic Swarm Memory](#-dynamic-swarm-memory-what-an-agents-turn-costs) |
 
 The second part is newer and is where the measurements are most uncomfortable,
 so they are stated in full: **6/6 correct on revised facts against 2/6 for a
@@ -352,7 +352,7 @@ anything other than `SHM_PIN_LOCKED` as "page reclaim can evict the working set"
 
 ---
 
-### 🧠 Dynamic Swarm Memory (NGP 4.6): what an agent's turn costs
+### 🧠 Dynamic Swarm Memory: what an agent's turn costs
 
 The benchmark above measures a **static index**: a corpus is built once and
 queried. The second half of this work measures a **changing** memory — an agent
@@ -366,6 +366,16 @@ so the model cannot answer from its weights and skip memory. Judge: a separate
 Anthropic model that reads each answer against the current and superseded values
 and grades the **assertion**, not the presence of a string.
 
+What does the work here is the L0 cascade plus slots written in Python —
+(entity, attribute) keys, decay and a supersession weight. The NGP 4.6
+reconsolidation operator runs on write but is **not on the search path**: with
+and without it the search results are byte-identical
+(`research/tests/test_operator_null.py`), and none of five ways of putting it
+there beat the slots ([`OPERATOR_SEARCH_FINDINGS.md`](research/docs/OPERATOR_SEARCH_FINDINGS.md)).
+The model-judged figures below were made before the slot matching was fixed on
+2026-11-06 (spelling before meaning, deterministic order); on the offline
+scenario that fix raised current-value recall from 0.871 to 0.980.
+
 | | measured | where |
 |---|---|---|
 | Hamming scan + exact re-rank (`Glyphs.search`, NumPy), 4,000 × 384-dim | **271 µs** | timed apart from the memory layer; no command in this repository prints it |
@@ -376,8 +386,8 @@ and grades the **assertion**, not the presence of a string.
 | accuracy on overwritten facts | **6/6** against 2/6 for full context | Haiku 5.5, 42 turns |
 | asserted a superseded value | **0/6** on both models tested | Haiku 5.5, Grok 4.6 |
 | false refusals (CIAR, below) | **0 of 264 turns** against 34 for full context | 6 runs × 44 turns |
-| Grassmannian non-unitarity | **9.9e-08 – 4.1e-07** after 19–35 writes | session threshold 1e-05 |
-| engine working set | **8.6 MB** (0.064 index + 6.14 re-rank corpus + 2.36 operator) | 4,000 vectors |
+| Grassmannian non-unitarity | **9.9e-08 – 4.1e-07** after 19–35 writes | session threshold 1e-05; the operator runs on write only and does not affect search results |
+| engine working set | **6.2 MB** (0.064 index + 6.14 re-rank corpus); 8.6 MB with the optional 2.36 MB operator, which search does not read | 4,000 vectors |
 
 #### Four things this table does not say, and must not be read as saying
 
@@ -400,10 +410,10 @@ at all, for 5,593 tokens per turn against the memory arm's 13,275. The
 prediction that a full-context agent loses the thread by turn 15–20 held on
 neither model tested.
 
-**The 8.6 MB is the engine; the local embedder is not.** Peak RSS for the full
+**The 6.2 MB is the engine; the local embedder is not.** Peak RSS for the full
 stand is **2.0 GB**, almost all of it PyTorch and the sentence encoder. A
 deployment that embeds elsewhere, or uses a smaller ONNX encoder, carries the
-8.6 MB figure; a deployment that embeds locally with this encoder needs the
+6.2 MB figure (8.6 MB with the operator); a deployment that embeds locally with this encoder needs the
 2 GB. Both numbers are measured, and quoting only the first would be misleading.
 
 #### Context-Induced Alignment Refusal (CIAR)
@@ -456,9 +466,14 @@ three of its four tests failed against the specified rule.
 product, so it cannot encode "these items are related": rotating query and
 corpus together leaves the top-10 identical and the scores agreeing to 8.26e-16.
 Seven experiments measuring retrieval recall through it found nothing, which is
-the correct result. Recall belongs to the cascade. Reconsolidation holds a
-changing memory together — retention of old associations as new ones arrive,
-measured in `research/retention_experiment.py`.
+the correct result. Recall belongs to the cascade, and stale values in the
+agent's memory are handled by the Python slots, not by the operator
+([`OPERATOR_SEARCH_FINDINGS.md`](research/docs/OPERATOR_SEARCH_FINDINGS.md)).
+What the operator does show is retention on synthetic associations:
+`research/retention_experiment.py` teaches random complex pairs q → x, 20 old
+then 60 new, and with `--dim 256 --rounds 800` forgetting is 0.200 against
+0.472 for an unprojected Oja update, at acquisition 0.643 against 0.682. One
+seed; nothing in it is agent memory.
 
 ---
 

@@ -32,7 +32,7 @@ python3 research/tests/test_reconsolidation_plasticity.py    # prints the values
 | static cascade: recall 10@10 | 88.0 % at 6,300–6,900 QPS/core | `cd benchmarks && make && ./run_benchmark` |
 | index footprint | 0.80 MB against 102.4 MB float32 (128×) | same |
 | cross-process SHM handoff, one-way | p50 30–290 ns across 8 runs | same |
-| retention under continual learning | forgetting 0.122 against 0.415 naive | `python3 research/retention_experiment.py --dim 256 --rounds 800` |
+| retention under continual learning, synthetic pairs, one seed | forgetting 0.200 against 0.472 naive, acquisition 0.643 against 0.682 (was stated as 0.122 against 0.415, which does not reproduce) | `python3 research/retention_experiment.py --dim 256 --rounds 800` (~17 min on 12 cores) |
 
 The two mutation checks matter more than the count: flipping `>=` to `>` in
 `srp_encode` and corrupting the accumulator in `srp_dot` are both caught.
@@ -100,6 +100,12 @@ grown.
 | tokens per turn | 7,335 | 3,799 | 13,275 | 5,593 |
 | non-unitarity after writes | 2.5e-07 | — | 1.4e-07 | — |
 
+The operator's non-unitarity is an invariant of the operator, not a property of
+this memory: reconsolidation runs on write and is not on the search path, so
+the memory arm's answers would be the same without it
+([`OPERATOR_SEARCH_FINDINGS.md`](research/docs/OPERATOR_SEARCH_FINDINGS.md)).
+Stale values are kept out by the Python slots.
+
 **In this regime full context is cheaper**, because a fact is one line and the
 control's context grows by only ~150–220 tokens per turn. The memory arm wins on
 correctness on Haiku and on refusal resistance on both, not on cost.
@@ -122,11 +128,11 @@ argument and is not claimed as one.
 |---|---|
 | glyph index, 4,000 × 128-bit | 0.064 MB |
 | float corpus held for exact re-ranking | 6.14 MB |
-| reconsolidation operator, 384-dim complex | 2.36 MB |
-| **engine total** | **8.6 MB** |
+| **engine total** | **6.2 MB** |
+| reconsolidation operator, 384-dim complex — optional, search does not read it | +2.36 MB (8.6 MB with it) |
 | peak RSS of the full stand | **2,006 MB** (PyTorch + encoder) |
 
-A deployment that embeds elsewhere carries 8.6 MB. One that embeds locally with
+A deployment that embeds elsewhere carries 6.2 MB. One that embeds locally with
 this encoder needs 2 GB. Both are measured; quoting only the first would
 misrepresent the requirement.
 

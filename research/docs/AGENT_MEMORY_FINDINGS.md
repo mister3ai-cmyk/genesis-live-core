@@ -21,7 +21,10 @@ else. Everything earlier must be retrieved through `search_memory` or recalled
 from `write_observation`. Retrieval is the engine's own two-stage cascade: the
 query is embedded, projected by `src/srp_lsh.c` into a 128-bit code, scanned by
 POPCNT, then exactly re-ranked. Reconsolidation (Oja + Newton-Schulz) fires on
-write only — a read is a scan and must stay microseconds.
+write only — a read is a scan and must stay microseconds. It is therefore not on
+the search path: with and without it the results are byte-identical, and
+everything this document says about stale values is the slots' doing, not the
+operator's ([`OPERATOR_SEARCH_FINDINGS.md`](OPERATOR_SEARCH_FINDINGS.md)).
 
 **Control arm.** No memory. Every document it has been handed stays in the
 prompt, and the history is never truncated.
