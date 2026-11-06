@@ -1,8 +1,8 @@
 # Does the reconsolidation operator change what the agent retrieves?
 
-**2026-11-06, 155 lines. 8 arms × 10 seeds × 2 name modes, ~1,050 queries per
+**2026-11-06, 249 lines. 8 arms × 10 seeds × 2 name modes, ~1,050 queries per
 arm. Offline: no model API, embedder paraphrase-multilingual-MiniLM-L12-v2,
-WSL Ubuntu, 12 cores. Every figure comes from one of the commands in §8.**
+WSL Ubuntu, 12 cores. Every figure comes from one of the commands in §9.**
 
 **Answer: no.** The operator does not reach the agent's search results, and
 none of the five ways of putting it there beats the slot rules written in
@@ -129,7 +129,7 @@ Fix (`agent_memory_traffic.py`, `_find_slot` and `_same_name`): compare
 spellings before meanings — case, `_`/`-`, articles, joined words, word
 subset, ≥4-letter prefix — and raise ENTITY_MATCH to 0.60, where no two
 different entities in this set merge. ATTR_MATCH stays 0.50. Grid over six
-policies, noengine, 10 seeds (scratch script, see the note in §8):
+policies, noengine, 10 seeds (scratch script, see the note in §9):
 
 | policy | exact: stale / fresh | synonyms: stale / fresh |
 |---|---|---|
@@ -174,7 +174,58 @@ never revisited, alignment |⟨x, Wq/‖Wq‖⟩|. One seed (`default_rng(5)`).
 command; that did not reproduce and was corrected. Default run (`dim 64,
 rounds 12`): forgetting 0.004 against 0.018, all alignments ≤ 0.23.
 
-## 8. Commands
+## 8. Real names: DeepSeek chained run on df984fa, and the twin guard
+
+The synonym figures in §5 come from aliases written by the same hand as the
+fix. To check against names a model chooses itself, the chained regime was run
+on df984fa: deepseek-flash, 42 turns, 3 rounds, `cost_comparison.py
+--writes-log`, 2026-11-06 04:25–05:20 UTC, off-peak, **$0.553** in all.
+
+| arm | correct of 6 | stale asserted | earlier run | forced answers |
+|---|---|---|---|---|
+| full_cache | 6, 6, 6 | 0, 0, 0 | 6, 6, 5 | 0 |
+| noengine_cache (slots) | 4, 5, 5 | 1, 1, 1 | 3, 6, 4 | 20, 18, 21 |
+| notes_cache (no supersession) | 3, 4, 6 | 2, 0, 0 | 5, 4, 4 | 20, 18, 15 |
+
+Slots 14/18 against plain notes 13/18 — within round-to-round spread. Full
+context 18/18: on short facts it stays ahead.
+
+The 205 writes (74 distinct (entity, attribute) pairs, filler turns excluded)
+are kept as the offline benchmark for slot matching:
+`research/tests/data/ds3_written_names.jsonl`, each row labelled with its
+quantity by `slot_names_replay.quantity()`. The labels were written after
+seeing the names; the judgement calls are listed in that function.
+
+Replayed through `_find_slot` (`slot_names_replay.py`), 117 true quantities:
+
+| version | slot misses | false merges | live slots |
+|---|---|---|---|
+| 151d2ae (original) | 16 | 34 | 113 |
+| df984fa (spelling first, E 0.60) | 16 | 32 | 114 |
+| **twin guard (current)** | 19 | **4** | 130 |
+
+df984fa changed almost nothing on real names: the model writes clean
+spellings. 28 of the 32 false merges were **twins** — `agent_beta.key` retiring
+`agent_alpha.key` (14), `tile_2.phase_shift` retiring `tile_1.phase_shift` (7),
+trust of `source_y` retiring trust of `source_x` (3): names that differ in one
+index token, which the embedding reads as one entity. The guard
+(`_siblings`) refuses a semantic entity merge when the names differ in exactly
+one token and both tokens are indices — digits, single letters, letter+digit
+(k1/k2) or Greek letter names. Lexical matches are unaffected.
+
+The three extra misses were accidental hits before: `phi_1.value` used to
+retire `tile_1.phase_shift` only because `tile_2` had already been merged into
+`tile_1`; and `source_y` / `source_x` speed, which the labels count as one
+quantity while the guard, by design, keeps the sources apart. The remaining
+misses need knowledge, not spelling: `phi_1.value` is `tile_1.phase_shift`,
+`ed25519_k1.key_status` is the state of `agent_alpha.key`.
+
+Synthetic scenario with the guard: exact 0.000 / 0.980, synonyms 0.247 / 0.918
+— identical to df984fa. Matching entities by spelling only (no semantic step)
+gives the same 19 / 4 on real names but raises synonym stale@5 to 0.354, so
+the guard keeps the semantic step and removes only the twins.
+
+## 9. Commands
 
 ```bash
 # Linux/WSL with gcc; sentence-transformers for the real-encoder parts
@@ -183,6 +234,11 @@ python3 research/operator_search_experiment.py --seeds 10             # §4 exac
 python3 research/operator_search_experiment.py --seeds 10 --synonyms  # §4 synonyms
 python3 -m pytest -m product research/tests/ -q                       # 4 passed, unchanged
 python3 research/retention_experiment.py --dim 256 --rounds 800       # §7
+python3 research/slot_names_replay.py research/tests/data/ds3_written_names.jsonl \
+        --old df984fa --new worktree                                  # §8 replay
+# §8 paid run (DeepSeek key needed): cost_comparison.py --model deepseek-flash
+#   --regime chained --arms full_cache noengine_cache notes_cache --chain-turns 42
+#   --rounds 3 --corpus 4000 --budget 0.8 --writes-log writes.jsonl
 ```
 
 Running several stands at once: set `OMP_NUM_THREADS` so the sum stays within

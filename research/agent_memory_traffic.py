@@ -262,6 +262,26 @@ def _same_name(a, b):
     return len(short) >= 4 and " " not in short and long_.startswith(short)
 
 
+_GREEK = set("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda "
+             "mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega".split())
+
+
+def _index_token(t):
+    return bool(re.fullmatch(r"[a-z]?\d+[a-z]?|[a-z]", t)) or t in _GREEK
+
+
+def _siblings(a, b):
+    """Разные экземпляры одного рода: agent_alpha / agent_beta, tile_1 /
+    tile_2, source_x / source_y. Эмбеддинг считает такие имена почти одним, и
+    на реальных именах DeepSeek (tests/data/ds3_written_names.jsonl) это 28 из
+    32 ложных вытеснений: запись ключа agent_beta гасила ключ agent_alpha."""
+    ta, tb = _norm_name(a).split(), _norm_name(b).split()
+    if len(ta) != len(tb):
+        return False
+    diff = [(x, y) for x, y in zip(ta, tb) if x != y]
+    return len(diff) == 1 and _index_token(diff[0][0]) and _index_token(diff[0][1])
+
+
 class Memory:
     """Память с атомарными слотами и стрелой времени.
 
@@ -396,7 +416,8 @@ class Memory:
         if not kin:
             ev = self._attr_vec(entity)
             kin = {ent for ent in ents
-                   if float(self._attr_vec(ent) @ ev) >= self.ENTITY_MATCH}
+                   if not _siblings(ent, entity)
+                   and float(self._attr_vec(ent) @ ev) >= self.ENTITY_MATCH}
         av = self._attr_vec(attribute)
         best, best_sim = None, 0.0
         for (ent, attr), idx in items:
