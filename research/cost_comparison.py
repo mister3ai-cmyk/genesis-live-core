@@ -15,6 +15,12 @@ Arms, on identical tasks, model and retrieval:
   memory         L0 memory tools, no caching (the earlier memory arm)
   memory_cache   the same with prompt caching
 
+Ablation arms, all cached, to find which part produces any gain:
+
+  rag_cache      search tool only: no writes, slots or operator
+  notes_cache    writes are stored and searched; no superseding, no decay
+  noengine_cache slots and decay, without the reconsolidation operator
+
 Regimes: "documents" (documents per turn, keyword scoring) and "chained" (facts
 revised mid-session, judged by a separate model). compact_cache runs in the
 documents regime only, because the chained loop has no compaction step.
@@ -29,6 +35,7 @@ Licensed under the Business Source License 1.1 (SPDX: BUSL-1.1); see research/LI
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -45,6 +52,117 @@ PRICES = {
 }
 CACHE_WRITE = 1.25
 CACHE_READ = 0.10
+# USD per million tokens at peak; off-peak is half. Recorded 2026-11-05 from
+# api-docs.deepseek.com/quick_start/pricing. Peak: 01-04 and 06-10 UTC, Mon-Fri.
+DEEPSEEK = {"deepseek-flash": dict(hit=0.006, miss=0.30, output=1.20),
+            "deepseek-v4-pro": dict(hit=0.044, miss=1.32, output=3.96)}
+PRICES.update({m: dict(input=0, output=0, long_input=0, long_output=0,
+                       long_above=10**12) for m in DEEPSEEK})
+
+SECRET_PATTERNS = [
+    r"\b\d{8,10}:[A-Za-z0-9_-]{30,}", r"sk-ant-[A-Za-z0-9_-]{10,}",
+    r"\bsk-[A-Za-z0-9_-]{20,}", r"\bxai-[A-Za-z0-9]{20,}",
+    r"\bgh[pos]_[A-Za-z0-9]{20,}", r"AIza[0-9A-Za-z_-]{30,}", r"PRIVATE KEY-----",
+    r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*[\"']?[A-Za-z0-9_\-]{16,}",
+]
+SECRET_FILES = r"(?i)(api-keys|agent-keys|secret|credential|\.env)"
+
+
+def sanitize(chunks):
+    """Nothing with a credential leaves this machine. Chunks are dropped rather
+    than redacted, because a partly redacted key file is still a key file."""
+    kept, dropped = [], 0
+    for c in chunks:
+        text = c["text"]
+        if re.search(SECRET_FILES, c["src"]) or any(re.search(p, text) for p in SECRET_PATTERNS):
+            dropped += 1
+            continue
+        text = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}", "<email>", text)
+        text = re.sub(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "<ip>", text)
+        kept.append(dict(c, text=text))
+    return kept, dropped
+
+
+class Capture:
+    """Keeps the raw response: the adapter drops DeepSeek's cache counters."""
+
+    def __init__(self, client):
+        self.real, self.chat, self.completions, self.last = client, self, self, None
+        self.bad_tool_args = 0
+
+    def create(self, **kw):
+        self.last = self.real.chat.completions.create(**kw)
+        # A malformed tool call is the model's failure and stays in the count;
+        # it must not end the whole run.
+        for tc in self.last.choices[0].message.tool_calls or []:
+            try:
+                json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                self.bad_tool_args += 1
+                tc.function.arguments = "{}"
+        return self.last
+
+
+def is_peak(now=None):
+    t = now or time.gmtime()
+    return t.tm_wday < 5 and (1 <= t.tm_hour < 4 or 6 <= t.tm_hour < 10)
+
+
+RAG_SYSTEM = (
+    "You are an agent whose knowledge lives in an external document corpus, not "
+    "in your context. The corpus is private project documentation you have never "
+    "seen in training, so you cannot answer from your own knowledge - search it. "
+    "Earlier turns are not kept in your context.")
+
+TURN_LOG = []
+_scored = a.scored
+
+
+def logged_scored(answer, terms):
+    ok = _scored(answer, terms)
+    TURN_LOG.append(1 if ok else 0)
+    return ok
+
+
+a.scored = logged_scored
+
+
+class PlainNotes(a.Memory):
+    """Notes are stored and searched, but nothing is superseded and nothing
+    decays: what the slots and the arrow of time add is measured against this."""
+
+    def _find_slot(self, entity, attribute):
+        return None, attribute, entity
+
+
+def log_writes(mem, path, arm, rnd, sched):
+    """Every write of a chained run as one JSONL row: the names the model chose
+    and the slot they landed in. Wraps this instance only - Memory is untouched,
+    so the run behaves exactly as without logging."""
+    find, write, last = mem._find_slot, mem.write, {}
+
+    def _find(entity, attribute):
+        prev, attr, ent = find(entity, attribute)
+        last.update(canon_entity=ent, canon_attribute=attr,
+                    slot_existed=prev is not None)
+        return prev, attr, ent
+
+    def _write(note, entity=None, attribute=None, value=None):
+        last.clear()
+        before = mem.superseded
+        out = write(note, entity, attribute, value)
+        t = mem.turn
+        ev = sched[t - 1] if 0 < t <= len(sched) else (None, None)
+        row = dict(arm=arm, round=rnd, turn=t, chain=ev[0], kind=ev[1],
+                   entity=entity, attribute=attribute, value=value, note=note,
+                   canon_entity=last.get("canon_entity"),
+                   canon_attribute=last.get("canon_attribute"),
+                   superseded=mem.superseded > before)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return out
+
+    mem._find_slot, mem.write = _find, _write
 
 
 class BudgetExceeded(Exception):
@@ -58,17 +176,46 @@ class Meter:
 
     spent_total = 0.0
 
-    def __init__(self, client, model, cache, budget):
+    def __init__(self, client, model, cache, budget, capture=None):
         self.client, self.cache, self.budget = client, cache, budget
+        self.capture, self.model = capture, model
         self.price = PRICES[model]
         self.messages = self
         self.calls = self.fresh = self.written = self.read = self.output = 0
         self.refusals = self.long_calls = 0
         self.usd = 0.0
+        self.force_at = None
+        self.forced = 0
 
     def create(self, **kw):
         if Meter.spent_total >= self.budget:
             raise BudgetExceeded("budget $%.2f reached" % self.budget)
+        if self.capture is not None:
+            # deepseek-flash finds the target on step 1 and keeps searching until
+            # the step limit, so the arm scored its looping and not the memory.
+            # The last allowed step goes without tools and has to answer.
+            if (self.force_at and kw.get("tools")
+                    and len(kw["messages"]) >= 2 * self.force_at - 1):
+                kw.pop("tools")
+                self.forced += 1
+            # DeepSeek caches on its own and reports it; there is no off switch.
+            r = self.client.messages.create(**kw)
+            raw = self.capture.last
+            u = raw.usage
+            read = getattr(u, "prompt_cache_hit_tokens", 0) or 0
+            fresh = getattr(u, "prompt_cache_miss_tokens", u.prompt_tokens - read) or 0
+            out = u.completion_tokens or 0
+            p = DEEPSEEK[self.model]
+            usd = (fresh * p["miss"] + read * p["hit"] + out * p["output"]) / 1e6
+            usd *= 1.0 if is_peak() else 0.5
+            self.calls += 1
+            self.fresh += fresh
+            self.read += read
+            self.output += out
+            self.refusals += 1 if raw.choices[0].finish_reason == "content_filter" else 0
+            self.usd += usd
+            Meter.spent_total += usd
+            return r
         if self.cache:
             kw["extra_body"] = {"cache_control": {"type": "ephemeral"}}
         r = self.client.messages.create(**kw)
@@ -97,7 +244,9 @@ class Meter:
     def row(self):
         return dict(calls=self.calls, fresh=self.fresh, cache_written=self.written,
                     cache_read=self.read, output=self.output, refusals=self.refusals,
-                    long_price_calls=self.long_calls, usd=round(self.usd, 5))
+                    long_price_calls=self.long_calls, usd=round(self.usd, 5),
+                    forced_answers=self.forced,
+                    bad_tool_args_total=self.capture.bad_tool_args if self.capture else 0)
 
 
 def arm_compact(client, model, tasks, chunks, glyphs, encoder, every):
@@ -142,14 +291,27 @@ def main():
     ap.add_argument("--budget", type=float, default=8.0)
     ap.add_argument("--out", default="/tmp/cost_comparison.jsonl")
     ap.add_argument("--encoder", default="paraphrase-multilingual-MiniLM-L12-v2")
+    ap.add_argument("--writes-log", help="chained regime: one JSONL row per write")
     args = ap.parse_args()
 
-    import anthropic
-    real = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    cap = None
+    if args.model in DEEPSEEK:
+        from openai import OpenAI
+        cap = Capture(OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"],
+                             base_url="https://api.deepseek.com"))
+        real = a.OpenAIAdapter(cap)
+        judge_model = args.model
+    else:
+        import anthropic
+        real = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        judge_model = "claude-haiku-5-5"
 
-    chunks = a.collect_chunks(a.CORPUS_ROOTS, args.corpus)
+    chunks, dropped = sanitize(a.collect_chunks(a.CORPUS_ROOTS, args.corpus))
+    left = sum(1 for c in chunks if any(re.search(p, c["text"]) for p in SECRET_PATTERNS))
+    if left:
+        sys.exit("sanitizer left %d chunks with credentials" % left)
     vecs, encoder = a.embed([c["text"] for c in chunks], args.encoder)
-    print("corpus %d, dim %d" % (len(chunks), vecs.shape[1]), flush=True)
+    print("corpus %d, dropped %d, dim %d" % (len(chunks), dropped, vecs.shape[1]), flush=True)
     fresh_glyphs = lambda: a.Glyphs(vecs.copy(), list(chunks))
 
     def record(**row):
@@ -161,14 +323,41 @@ def main():
         for rnd in range(args.rounds):
             if "documents" in args.regime:
                 tasks = a.build_tasks(chunks, args.turns, np.random.default_rng(11))
+                base = fresh_glyphs()
+                ceiling = 0
+                for t in tasks:
+                    qv = encoder.encode([t["prompt"]],
+                                        normalize_embeddings=True)[0].astype(np.float32)
+                    ceiling += 1 if t["chunk"] in [i for i, _ in base.search(qv)] else 0
                 for arm in args.arms or ["full", "full_cache", "compact_cache",
                                          "memory", "memory_cache"]:
-                    m = Meter(real, args.model, arm.endswith("_cache"), args.budget)
+                    m = Meter(real, args.model, arm.endswith("_cache"), args.budget, cap)
+                    m.force_at = 9 if cap else None     # arm_memory max_steps
                     g = fresh_glyphs()
                     t0 = time.time()
-                    if arm.startswith("memory"):
+                    TURN_LOG.clear()
+                    reads = None
+                    if arm.startswith("rag"):
+                        saved = a.TOOLS, a.SYSTEM_MEM
+                        a.TOOLS, a.SYSTEM_MEM = [a.TOOLS[0]], RAG_SYSTEM
+                        try:
+                            mem = a.Memory(g, encoder, None)
+                            s = a.arm_memory(m, args.model, tasks, mem)
+                        finally:
+                            a.TOOLS, a.SYSTEM_MEM = saved
+                        reads = mem.reads
+                    elif arm.startswith("notes"):
+                        mem = PlainNotes(g, encoder, None, tau=1e9)
+                        s = a.arm_memory(m, args.model, tasks, mem)
+                        reads = mem.reads
+                    elif arm.startswith("noengine"):
+                        mem = a.Memory(g, encoder, None)
+                        s = a.arm_memory(m, args.model, tasks, mem)
+                        reads = mem.reads
+                    elif arm.startswith("memory"):
                         mem = a.Memory(g, encoder, a.load_engine(vecs.shape[1]))
                         s = a.arm_memory(m, args.model, tasks, mem)
+                        reads = mem.reads
                     elif arm.startswith("compact"):
                         s = arm_compact(m, args.model, tasks, chunks, g, encoder,
                                         args.compact_every)
@@ -177,25 +366,38 @@ def main():
                                        np.random.default_rng(11), glyphs=g, encoder=encoder)
                     record(regime="documents", round=rnd, arm=arm, turns=len(tasks),
                            correct=s["correct"], seconds=round(time.time() - t0),
-                           **m.row())
+                           searches=reads, ceiling=ceiling,
+                           per_turn="".join(map(str, TURN_LOG)), **m.row())
             if "chained" in args.regime:
                 tasks = a.build_tasks(chunks, args.chain_turns, np.random.default_rng(11))
                 sched = a.build_schedule(args.chain_turns, tasks)
                 for arm in args.arms or ["full", "full_cache", "memory", "memory_cache"]:
-                    if arm.startswith("compact"):
+                    if arm.startswith(("compact", "rag")):
                         continue
-                    m = Meter(real, args.model, arm.endswith("_cache"), args.budget)
+                    m = Meter(real, args.model, arm.endswith("_cache"), args.budget, cap)
+                    m.force_at = 7 if cap else None     # run_chained max_steps
+                    judge = Meter(real, args.model, False, args.budget, cap)
                     t0 = time.time()
-                    if arm.startswith("memory"):
+                    if arm.startswith("notes"):
+                        mem = PlainNotes(fresh_glyphs(), encoder, None, tau=1e9)
+                        kind = "memory"
+                    elif arm.startswith("noengine"):
+                        mem = a.Memory(fresh_glyphs(), encoder, None, tau=12.0)
+                        kind = "memory"
+                    elif arm.startswith("memory"):
                         mem = a.Memory(fresh_glyphs(), encoder,
                                        a.load_engine(vecs.shape[1]), tau=12.0)
                         kind = "memory"
                     else:
                         mem = a.Memory(fresh_glyphs(), encoder, None)
                         kind = "full"
+                    if args.writes_log and kind == "memory":
+                        log_writes(mem, args.writes_log, arm, rnd, sched)
                     s = a.run_chained(m, args.model, sched, mem, arm=kind,
-                                      judge_client=real, judge_model="claude-haiku-5-5")
+                                      judge_client=judge if cap else real,
+                                      judge_model=judge_model)
                     record(regime="chained", round=rnd, arm=arm, turns=len(sched),
+                           judge_usd=round(judge.usd, 5),
                            correct=s.get("correct", 0), probes=s.get("probes", 0),
                            stale=s.get("stale_asserted", 0),
                            arm_refusals=s.get("refusals", 0),
