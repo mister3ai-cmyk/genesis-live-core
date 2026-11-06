@@ -135,6 +135,39 @@ class PlainNotes(a.Memory):
         return None, attribute, entity
 
 
+def long_schedule(turns, filler_tasks, base=42, late_window=None):
+    """The six chains of agent_memory_traffic.CHAINS stretched over `turns`
+    (event turn t -> t * turns / base), and every probe asked a second time,
+    spread over the last `late_window` turns (min(15, turns // 4): turns 185,
+    188 ... 200 for a 200-turn run). Without the stretch all events sit in
+    turns 1-40 and a 200-turn run is 160 turns of filler.
+    Returns the schedule and, per item, whether it is a late repeat."""
+    lw = late_window or min(15, turns // 4)
+    n = len(a.CHAINS)
+    slot = {}
+    for i, ch in enumerate(a.CHAINS):
+        for ev in ch["events"]:
+            item = (ch["name"],) + tuple(ev[1:])
+            if len(item) == 3:
+                item = item + ([], [])
+            t = max(1, round(ev[0] * turns / base))
+            slot.setdefault(t, []).append((item, False))
+            if ev[1] == "probe":
+                at = turns - lw + round(i * lw / (n - 1))
+                slot.setdefault(at, []).append((item, True))
+    out, late, fi = [], [], 0
+    for t in range(1, turns + 1):
+        if t in slot:
+            for item, is_late in slot[t]:
+                out.append(item)
+                late.append(is_late)
+        elif fi < len(filler_tasks):
+            out.append(("наполнитель", "filler", filler_tasks[fi]["prompt"], [], []))
+            late.append(False)
+            fi += 1
+    return out, late
+
+
 def log_writes(mem, path, arm, rnd, sched):
     """Every write of a chained run as one JSONL row: the names the model chose
     and the slot they landed in. Wraps this instance only - Memory is untouched,
@@ -292,6 +325,9 @@ def main():
     ap.add_argument("--out", default="/tmp/cost_comparison.jsonl")
     ap.add_argument("--encoder", default="paraphrase-multilingual-MiniLM-L12-v2")
     ap.add_argument("--writes-log", help="chained regime: one JSONL row per write")
+    ap.add_argument("--stretch", action="store_true",
+                    help="chained regime: spread the chains over --chain-turns "
+                         "and repeat every probe at the end (long_schedule)")
     args = ap.parse_args()
 
     cap = None
@@ -370,7 +406,12 @@ def main():
                            per_turn="".join(map(str, TURN_LOG)), **m.row())
             if "chained" in args.regime:
                 tasks = a.build_tasks(chunks, args.chain_turns, np.random.default_rng(11))
-                sched = a.build_schedule(args.chain_turns, tasks)
+                if args.stretch:
+                    sched, late = long_schedule(args.chain_turns, tasks)
+                else:
+                    sched = a.build_schedule(args.chain_turns, tasks)
+                    late = [False] * len(sched)
+                probe_late = [l for e, l in zip(sched, late) if e[1] == "probe"]
                 for arm in args.arms or ["full", "full_cache", "memory", "memory_cache"]:
                     if arm.startswith(("compact", "rag")):
                         continue
@@ -396,10 +437,19 @@ def main():
                     s = a.run_chained(m, args.model, sched, mem, arm=kind,
                                       judge_client=judge if cap else real,
                                       judge_model=judge_model)
+                    per_probe = [dict(chain=p["chain"], late=l, verdict=p["verdict"],
+                                      cites_history=p.get("cites_history"),
+                                      answer=(p.get("answer") or "")[:400])
+                                 for p, l in zip(s.get("answers", []), probe_late)]
+                    lp = [p for p in per_probe if p["late"]]
                     record(regime="chained", round=rnd, arm=arm, turns=len(sched),
                            judge_usd=round(judge.usd, 5),
                            correct=s.get("correct", 0), probes=s.get("probes", 0),
                            stale=s.get("stale_asserted", 0),
+                           late_probes=len(lp),
+                           late_correct=sum(p["verdict"] == "correct" for p in lp),
+                           late_stale=sum(p["verdict"] == "stale_asserted" for p in lp),
+                           per_probe=per_probe,
                            arm_refusals=s.get("refusals", 0),
                            seconds=round(time.time() - t0), **m.row())
     except BudgetExceeded as e:

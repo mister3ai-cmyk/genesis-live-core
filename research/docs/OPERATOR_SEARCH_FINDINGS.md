@@ -1,8 +1,8 @@
 # Does the reconsolidation operator change what the agent retrieves?
 
-**2026-11-06, 249 lines. 8 arms × 10 seeds × 2 name modes, ~1,050 queries per
+**2026-11-06, 301 lines. 8 arms × 10 seeds × 2 name modes, ~1,050 queries per
 arm. Offline: no model API, embedder paraphrase-multilingual-MiniLM-L12-v2,
-WSL Ubuntu, 12 cores. Every figure comes from one of the commands in §9.**
+WSL Ubuntu, 12 cores. Every figure comes from one of the commands in §10.**
 
 **Answer: no.** The operator does not reach the agent's search results, and
 none of the five ways of putting it there beats the slot rules written in
@@ -129,7 +129,7 @@ Fix (`agent_memory_traffic.py`, `_find_slot` and `_same_name`): compare
 spellings before meanings — case, `_`/`-`, articles, joined words, word
 subset, ≥4-letter prefix — and raise ENTITY_MATCH to 0.60, where no two
 different entities in this set merge. ATTR_MATCH stays 0.50. Grid over six
-policies, noengine, 10 seeds (scratch script, see the note in §9):
+policies, noengine, 10 seeds (scratch script, see the note in §10):
 
 | policy | exact: stale / fresh | synonyms: stale / fresh |
 |---|---|---|
@@ -225,7 +225,57 @@ Synthetic scenario with the guard: exact 0.000 / 0.980, synonyms 0.247 / 0.918
 gives the same 19 / 4 on real names but raises synonym stale@5 to 0.354, so
 the guard keeps the semantic step and removes only the twins.
 
-## 9. Commands
+## 9. Decisive run: slot rules against RAG over notes, 200 turns
+
+Not a test of NGP 4.6: the operator is in no arm. Protocol fixed before the
+run (2026-11-06): deepseek-flash, chained, the six chains stretched over 200
+turns and every probe repeated in turns 185–200 (`cost_comparison.py
+--stretch`, `long_schedule`), 12 probes per round of which 6 late, 3 rounds,
+code 0b9fbda. Arms: **slots** = noengine_cache, **rag** = notes_cache (notes
+stored and searched, no supersession, no decay), **full_cache** = control.
+Primary metric: stale value asserted on late probes, 18 per arm.
+
+| arm | late stale (of 6) | late correct (of 6) | all correct (of 12) | all stale | $ per round |
+|---|---|---|---|---|---|
+| slots | 0, 0, 0 → **0 / 18** | 5, 5, 6 → 16 / 18 | 11, 11, 12 → 34 / 36 | 0 | 0.59–0.61 |
+| rag | 0, 1, 2 → **3 / 18** | 5, 5, 4 → 14 / 18 | 11, 10, 8 → 29 / 36 | 6 | 0.57–0.59 |
+| full_cache | 0, 0, 0 → 0 / 18 | 5, 6, 6 → 17 / 18 | 9, 12, 12 → 33 / 36 | 0 | 0.07–0.09 |
+
+Decision rule, fixed in advance — slots win if (1) rag − slots ≥ 3 stale on
+late probes, (2) slots correct ≥ rag correct − 1, (3) the direction holds in
+≥ 2 of 3 rounds:
+
+1. 3 − 0 = **3** — met, exactly at the threshold
+2. late 16 against 14, all 34 against 29 — met
+3. round 0 tie, rounds 1 and 2 rag worse — **2 of 3**, met
+
+**Verdict under the pre-registered rule: the slot rules beat RAG over notes on
+stale values at 200 turns.** The evidence is weak, as stated before the run:
+the margin is 3 of 18 and sits on the threshold; rag's stale answers grew
+0 → 1 → 2 across rounds, which is noise as easily as signal.
+
+What else the run says:
+
+- **Full context is as good and seven times cheaper** at 200 turns: 0 stale,
+  33/36 correct, $0.25 for three rounds against $1.79 for slots. With prompt
+  caching, carrying the whole history did not break down by turn 200 on these
+  chains. Memory's advantage here is over a naive memory, not over no memory.
+- Both memory arms hit the forced final answer on ~146–152 turns per round:
+  deepseek-flash keeps calling tools until the step limit.
+- Run: 10:00–15:12 UTC; the $3.50 cap stopped it before the ninth row
+  (rag, round 2), which was run separately at 20:03–20:56 UTC with the same
+  code and schedule. Total $4.14 including the 20-turn check; DeepSeek balance
+  $5.15 → $0.47 over the day.
+- Names from this run (214 writes, 90 pairs, none seen while building the
+  guard) replayed through `_find_slot`: df984fa 14 misses / 23 false merges,
+  0b9fbda 16 / **7**. The twin guard holds out of sample. 14 rows carry names
+  the quantity labels do not cover and are counted as their own quantity.
+
+Data: `results-200-chain.jsonl` (8 rows) and
+`results-200-rag-r2.jsonl` (1 row) on the stand host, with the
+verdict and answer text of every probe; names in `writes-200*.jsonl`.
+
+## 10. Commands
 
 ```bash
 # Linux/WSL with gcc; sentence-transformers for the real-encoder parts
@@ -239,6 +289,8 @@ python3 research/slot_names_replay.py research/tests/data/ds3_written_names.json
 # §8 paid run (DeepSeek key needed): cost_comparison.py --model deepseek-flash
 #   --regime chained --arms full_cache noengine_cache notes_cache --chain-turns 42
 #   --rounds 3 --corpus 4000 --budget 0.8 --writes-log writes.jsonl
+# §9 paid run: the same with --stretch --chain-turns 200 --budget 3.5
+#   (the ninth row: --arms notes_cache --rounds 1 --budget 1.0)
 ```
 
 Running several stands at once: set `OMP_NUM_THREADS` so the sum stays within
