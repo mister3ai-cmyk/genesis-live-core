@@ -477,6 +477,29 @@ seed; nothing in it is agent memory.
 
 ---
 
+### 🛰️ Swarm Memory Simulator: five nodes, lossy links, seven attacks
+
+`research/swarm/` (BSL 1.1) asks whether a small swarm can keep one shared
+picture of the world when links drop packets, the network splits, and one node
+lies. It is a **model on one machine**: five processes exchanging UDP on
+127.0.0.1 in lockstep, with real Ed25519 signatures. No radio, no flight
+hardware and no autopilot code is involved.
+
+| | measured | condition |
+|---|---|---|
+| traffic per node | **31.4 kbit/s** (was 369.5 before batching) | budget 50; 500 ms batches, one signature over a Merkle root |
+| convergence, 40 % packet loss | **10/10** seeds, chain and full mesh, with and without a split | 490-run grid |
+| slander (a node refutes true facts) | **0 %** false quarantine (was 36 %), 0 honest nodes slashed | sensors in the model are noiseless |
+| forged, tampered, replayed, revoked-key events | **100 %** blocked | revoked-key blocking relies on the 500 ms batch delay |
+
+What it does not show: behaviour on real radios, noisy sensors (one false
+refutation slashes an accuser for good, which only holds without noise), or a
+validation flood after long silence. Every figure, the holes and the commands
+are in [`SWARM_FINDINGS.md`](research/swarm/SWARM_FINDINGS.md); the 28 tests run
+in CI (`python3 -m pytest research/swarm/tests -q`).
+
+---
+
 ### 🔍 Quick Start for Reviewers
 
 Three commands, no API key and no network access required. Tested from a clean
@@ -694,11 +717,12 @@ tests/        Unit tests for the C core: 33 checks over srp_dot, srp_encode,
               Charikar's theta/pi property.  `cd tests && make check`   (Apache-2.0)
 research/     Archived research modules, specs and earlier harnesses        (BSL 1.1, see research/LICENSE)
 research/genesis-bridge/  ctypes bridge + SQLite face store demo         (BSL 1.1)
+research/swarm/  swarm memory simulator: 5 nodes, UDP, Ed25519, attacks T1-T7 (BSL 1.1)
 ```
 
 **What `research/` is, and is not.** It holds mathematical models, simulations and
 design notes — Python prototypes exploring ideas that are not part of the shipped
-engine. Those modules import nothing beyond `numpy` and the standard library: there
+engine. Those modules import nothing beyond `numpy` and the standard library (the swarm simulator also needs `cryptography` for Ed25519): there
 are no device drivers, no fieldbus or robotics interfaces, and no hardware in the
 loop. Nothing in `research/` is required to build or run the core or the benchmarks,
 and none of it should be read as a validated or deployable component.
