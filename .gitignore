@@ -13,3 +13,6 @@ venv/
 .venv/
 *.dylib
 *.log
+
+# research/swarm: результаты прогонов (~8 МБ), подтверждение - в SWARM_FINDINGS.md
+research/swarm/*.jsonl

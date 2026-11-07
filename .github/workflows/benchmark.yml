@@ -38,7 +38,7 @@ jobs:
           python-version: "3.14"
 
       - name: Install test dependencies
-        run: python -m pip install numpy pytest
+        run: python -m pip install numpy pytest cryptography
 
       - name: Python tests
         run: python -m pytest -q
