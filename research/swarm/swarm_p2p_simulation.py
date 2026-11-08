@@ -44,7 +44,13 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 duration_s=600, events_until_s=480, tick_ms=TICK_MS, K=10,
                 revoke_at_ms=240_000, base_port=21000, slot_digest=True,
                 batch_ms=500, slash=True,          # v1.1; v1.0 = batch_ms 0, slash False
-                rate_mode="kseq")      # v1.2 kseq; v1.2 = "seq", v1.1 = "hlc"
+                rate_mode="kseq",      # v1.2 kseq; v1.2 = "seq", v1.1 = "hlc"
+                sensor_noise=0.0,      # v1.3: доля неверных измерений датчика
+                slash_window=3,        # v1.3: порог оконного штрафа; 1 = v1.2
+                refute_quorum=2,       # v1.3: опровержение действует от N узлов
+                confirm_quorum=1,      # v1.3: подтверждение действует от N узлов
+                quorum_scope="all", confirm_cap=None, refute_cap=None,
+                rebut=False, admit_rule="trust", liar_k=0)
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -146,7 +152,14 @@ def run_once(cfg):
                 revoke_at_ms=cfg["revoke_at_ms"], base_port=cfg["base_port"],
                 truth=world["truth"], drifts=cfg.get("drifts"),
                 slot_digest=cfg["slot_digest"], batch_ms=cfg["batch_ms"],
-                slash=cfg["slash"], rate_mode=cfg["rate_mode"])
+                slash=cfg["slash"], rate_mode=cfg["rate_mode"],
+                sensor_noise=cfg["sensor_noise"],
+                slash_window=cfg["slash_window"],
+                refute_quorum=cfg["refute_quorum"],
+                confirm_quorum=cfg["confirm_quorum"],
+                quorum_scope=cfg["quorum_scope"], confirm_cap=cfg["confirm_cap"],
+                refute_cap=cfg["refute_cap"], rebut=cfg["rebut"],
+                admit_rule=cfg["admit_rule"], liar_k=cfg["liar_k"])
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -184,6 +197,25 @@ def run_once(cfg):
         rec["slot_digest"] = False
     rec["batch_ms"], rec["slash"] = cfg["batch_ms"], cfg["slash"]
     rec["rate_mode"] = cfg["rate_mode"]
+    if cfg["sensor_noise"]:
+        rec["sensor_noise"] = cfg["sensor_noise"]
+    rec["slash_window"] = cfg["slash_window"]
+    if cfg["refute_quorum"] > 1:
+        rec["refute_quorum"] = cfg["refute_quorum"]
+    if cfg["confirm_quorum"] > 1:
+        rec["confirm_quorum"] = cfg["confirm_quorum"]
+    if cfg["quorum_scope"] != "all":
+        rec["quorum_scope"] = cfg["quorum_scope"]
+    if cfg["confirm_cap"]:
+        rec["confirm_cap"] = cfg["confirm_cap"]
+    if cfg["refute_cap"]:
+        rec["refute_cap"] = cfg["refute_cap"]
+    if cfg["rebut"]:
+        rec["rebut"] = True
+    if cfg["admit_rule"] != "trust":
+        rec["admit_rule"] = cfg["admit_rule"]
+    if cfg["liar_k"]:
+        rec["liar_k"] = cfg["liar_k"]
     rec["metrics"] = m
     return rec, results
 
@@ -404,6 +436,9 @@ def compute_metrics(cfg, world, results):
     sl = [(i, int(v), ms) for i in honest for v, ms in results[i]["slashed"].items()]
     m["slashed_honest"] = sum(1 for (_, v, _) in sl if v in honest)
     m["slashed_attacker_by"] = sum(1 for (_, v, _) in sl if v not in honest)
+    m["sensor_flips"] = sum(results[i].get("sensor_flips", 0) for i in honest)
+    m["strikes_on_honest"] = sum(k for i in honest for v, k in results[i].get("strikes", {}).items()
+                                 if int(v) in honest)
     if attacked:
         ts = [ms - sn.ATTACK_START_MS for (_, v, ms) in sl if v == cfg["attacker"]]
         m["slash_after_attack_s"] = (None if not ts else
@@ -467,6 +502,37 @@ def attack_metrics(cfg, results, honest, keys, kidx, tick):
         r["blocked_frac"] = None if passed is None else _r(1 - passed / max(len(items), 1))
         if typ == "T4":
             ids = {eid for (eid, _, _, _) in items}
+            # v1.3: время вытеснения (TtE) - сколько секунд каждая ложь была
+            # в картине большинства честных узлов
+            delta = {}
+            for i in honest:
+                cur = {}
+                for (tk, ki, eid, vh) in results[i]["changes"]:
+                    old = cur.get(ki)
+                    if old in ids:
+                        delta.setdefault(old, {})
+                        delta[old][tk] = delta[old].get(tk, 0) - 1
+                    if eid in ids:
+                        delta.setdefault(eid, {})
+                        delta[eid][tk] = delta[eid].get(tk, 0) + 1
+                    cur[ki] = eid
+            end_tk = cfg["duration_s"] * 1000 // tick
+            half = len(honest) / 2
+            ttes = []
+            for eid, d in delta.items():
+                cnt, prev, maj = 0, None, 0
+                for tk in sorted(d):
+                    if prev is not None and cnt > half:
+                        maj += tk - prev
+                    cnt += d[tk]
+                    prev = tk
+                if prev is not None and cnt > half:
+                    maj += end_tk - prev
+                if maj:
+                    ttes.append(maj * tick / 1000)
+            r["lies_in_majority"] = len(ttes)
+            r["tte_max_s"] = _r(max(ttes), 2) if ttes else 0.0
+            r["tte_over_1_5s"] = sum(1 for x in ttes if x > 1.5)
             trans = []
             for i in honest:
                 cur, cnt = {}, 0
@@ -530,6 +596,14 @@ def grid(which):
                         for s in seeds:
                             cfgs.append(dict(branch=branch, topology=topo,
                                              loss=loss, partition=part, seed=s))
+    if which == "probe13":
+        # разведка v1.3: без атаки, T4, T7 x 5 зёрен + цепочка 40 % isolate x 5
+        for att in ("none", "T4", "T7"):
+            for s in range(1, 6):
+                cfgs.append(dict(branch="B", loss=0.05, attack=att, seed=s))
+        for s in range(1, 6):
+            cfgs.append(dict(branch="B", topology="chain", loss=0.4,
+                             partition="isolate", seed=s))
     if which == "check12":
         # короткая проверка раздельных номеров: цепочка 40 % и трафик без атак
         for part in ("none", "isolate", "split"):
@@ -578,6 +652,21 @@ def run_grid(cfgs, out, workers, extra):
                 "n", "seed", "branch", "loss", "topology", "partition", "attack",
                 "attacker", "trust_init", "duration_s", "events_until_s",
                 "tick_ms", "K", "batch_ms", "slash", "rate_mode")}
+            if dict(DEFAULTS, **c)["sensor_noise"]:
+                rec["sensor_noise"] = dict(DEFAULTS, **c)["sensor_noise"]
+            rec["slash_window"] = dict(DEFAULTS, **c)["slash_window"]
+            for q in ("refute_quorum", "confirm_quorum"):
+                if dict(DEFAULTS, **c)[q] > 1:
+                    rec[q] = dict(DEFAULTS, **c)[q]
+            if dict(DEFAULTS, **c)["quorum_scope"] != "all":
+                rec["quorum_scope"] = dict(DEFAULTS, **c)["quorum_scope"]
+            if dict(DEFAULTS, **c)["admit_rule"] != "trust":
+                rec["admit_rule"] = dict(DEFAULTS, **c)["admit_rule"]
+            if dict(DEFAULTS, **c)["liar_k"]:
+                rec["liar_k"] = dict(DEFAULTS, **c)["liar_k"]
+            for q in ("confirm_cap", "refute_cap", "rebut"):
+                if dict(DEFAULTS, **c)[q]:
+                    rec[q] = dict(DEFAULTS, **c)[q]
             rec["error"] = repr(e)
         finally:
             ports.put(port)
@@ -600,7 +689,17 @@ def _cfg_key(r):
                                 "partition", "attack", "trust_init",
                                 "duration_s")) + (r.get("batch_ms", 0),
                                                   r.get("slash", False),
-                                                  r.get("rate_mode", "hlc"))
+                                                  r.get("rate_mode", "hlc"),
+                                                  r.get("sensor_noise", 0.0),
+                                                  r.get("slash_window", 1),
+                                                  r.get("refute_quorum", 1),
+                                                  r.get("confirm_quorum", 1),
+                                                  r.get("quorum_scope", "all"),
+                                                  r.get("confirm_cap"),
+                                                  r.get("refute_cap"),
+                                                  r.get("rebut", False),
+                                                  r.get("admit_rule", "trust"),
+                                                  r.get("liar_k", 0))
 
 
 # ------------------------------------------------------------------- отчёт
@@ -814,6 +913,9 @@ def _rule_rows(path):
             _fmt(statistics.mean(x["attacks"]["T5"]["stored_frac_at_honest"]
                                  for x in t5), 4),
             _fmt(_med([x["attacks"]["T5"]["time_to_block_s"] for x in t5]), 2))
+    t4 = sel(attack="T4")
+    out["v1.3: T4 прошло лжи (сумма по зёрнам)"] = str(sum(
+        x["attacks"]["T4"]["passed"] or 0 for x in t4))
     out["v1.2: T5 = эталону"] = _fmt(statistics.mean(
         x["ref_match_frac"] for x in t5), 4)
     dl = [x for x in sel() if x.get("delay_ms_p50") is not None]
@@ -898,7 +1000,7 @@ def main():
     ap.add_argument("--nodes", type=int, default=5)
     ap.add_argument("--tick-ms", type=int, default=TICK_MS)
     ap.add_argument("--K", type=int, default=10)
-    ap.add_argument("--grid", choices=("all", "conv", "attacks", "sens", "check12"))
+    ap.add_argument("--grid", choices=("all", "conv", "attacks", "sens", "check12", "probe13"))
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--out", default=os.path.join(HERE, "results.jsonl"))
     ap.add_argument("--report")
@@ -914,6 +1016,28 @@ def main():
                     help="лимит частоты: kseq - раздельные номера glyph/validation "
                          "(v1.2, по умолчанию) | seq - общий номер (v1.2, первая "
                          "сетка) | hlc - по секунде HLC (v1.0, v1.1)")
+    ap.add_argument("--sensor-noise", type=float, default=0.0,
+                    help="v1.3: доля измерений датчика с неверным вердиктом (0.01 = 1 %%)")
+    ap.add_argument("--slash-window", type=int, default=3,
+                    help="v1.3: штраф после K ложных опровержений (и >=25 %% проверенно-верных "
+                         "из окна 200); 1 = мгновенный штраф v1.2")
+    ap.add_argument("--refute-quorum", type=int, default=2,
+                    help="v1.3: опровержение действует, когда событие опровергли N разных узлов")
+    ap.add_argument("--confirm-quorum", type=int, default=1,
+                    help="v1.3: подтверждение действует, когда событие подтвердили N разных узлов")
+    ap.add_argument("--quorum-scope", default="all", choices=("all", "trust"),
+                    help="v1.3: кворум держит вес события и доверие (all) или только доверие (trust)")
+    ap.add_argument("--confirm-cap", type=float, default=None,
+                    help="v1.3: потолок веса одного подтверждения (ниже порога приёма 1.0)")
+    ap.add_argument("--refute-cap", type=float, default=None,
+                    help="v1.3: потолок веса одного опровержения")
+    ap.add_argument("--admit-rule", default="trust",
+                    choices=("trust", "net-balance", "log-odds", "sensor-veto"),
+                    help="v1.3: правило приёма - доверие Q2 или функция от множеств оценщиков")
+    ap.add_argument("--liar-k", type=int, default=0,
+                    help="v1.3: автор с K событиями, опровергнутыми >=2 узлами, теряет вес (0 = выкл)")
+    ap.add_argument("--rebut", action="store_true",
+                    help="v1.3: отвечать подтверждением на опровержение того, что мой сенсор видит верным")
     ap.add_argument("--no-slot-digest", action="store_true",
                     help="PULL v1: digest без карты слотов (только журнал)")
     a = ap.parse_args()
@@ -932,6 +1056,16 @@ def main():
     extra["batch_ms"] = a.batch_ms
     extra["slash"] = a.slash == "on"
     extra["rate_mode"] = a.rate
+    extra["sensor_noise"] = a.sensor_noise
+    extra["slash_window"] = a.slash_window
+    extra["refute_quorum"] = a.refute_quorum
+    extra["confirm_quorum"] = a.confirm_quorum
+    extra["quorum_scope"] = a.quorum_scope
+    extra["confirm_cap"] = a.confirm_cap
+    extra["refute_cap"] = a.refute_cap
+    extra["rebut"] = a.rebut
+    extra["admit_rule"] = a.admit_rule
+    extra["liar_k"] = a.liar_k
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return

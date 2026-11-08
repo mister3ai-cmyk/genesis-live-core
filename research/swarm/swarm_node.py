@@ -34,6 +34,7 @@ import random
 import socket
 import time
 from bisect import bisect_left, bisect_right, insort
+from collections import deque
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -319,8 +320,10 @@ class Sensor:
     WINDOW_MS = 5_000
     POS_TOL = 300
 
-    def __init__(self, truth, seed, idx):
+    def __init__(self, truth, seed, idx, noise=0.0):
         self.truth, self.seed, self.idx = truth, seed, idx
+        self.noise = noise      # v1.3: доля измерений с неверным вердиктом
+        self.flips = 0
 
     def covers(self, key, now_ms):
         h = hashlib.sha256(("cov:%s:%d:%s:%d" % (
@@ -334,6 +337,18 @@ class Sensor:
         return vals[i:max(j, i + 1)]
 
     def check(self, key, value, hlc_l, now_ms):
+        ok = self._check(key, value, hlc_l, now_ms)
+        if self.noise:
+            # v1.3: одно измерение на событие - повторная проверка того же
+            # события даёт тот же ответ (зерно, узел, ключ, значение, hlc)
+            h = hashlib.sha256(("noise:%s:%d:%s:%r:%d" % (
+                self.seed, self.idx, key, value, hlc_l)).encode()).digest()
+            if int.from_bytes(h[:4], "big") < self.noise * 2 ** 32:
+                self.flips += 1
+                return not ok
+        return ok
+
+    def _check(self, key, value, hlc_l, now_ms):
         cand = self.values_in(key, hlc_l - self.WINDOW_MS,
                               min(hlc_l + self.WINDOW_MS, now_ms))
         if key.endswith(".status"):
@@ -383,6 +398,12 @@ class Node:
     # v1.2: лимит по seq автора - seq <= SEQ_RATE*(сек HLC + 1) + SEQ_BURST.
     # Решение записано в подписанном событии и не зависит от порядка прихода
     # и от того, сколько событий легло в одну секунду HLC при отставших часах.
+    # v1.3: оконный штраф. Обвинитель штрафуется, когда опроверг не меньше
+    # slash_window событий из последних SLASH_WIN, которые мой сенсор признал
+    # верными, и это не меньше SLASH_SHARE от них. Честный с шумом P опровергает
+    # верное с долей ~0.6*P (покрытие * шум), клеветник T7 - почти всё.
+    SLASH_WIN = 200
+    SLASH_SHARE = 0.25
     SEQ_RATE = 20                            # 2x честного темпа (10 событий/с)
     SEQ_BURST = 200
 
@@ -419,7 +440,8 @@ class Node:
         self.kseq = {"glyph": 0, "validation": 0}   # свои номера по видам
         self.by_kseq = set()                        # (автор, вид, kseq)
         self.seq_lead = {}      # автор -> max(seq - SEQ_RATE*(сек HLC + 1))
-        self.sensor = Sensor(cfg["truth"], seed, idx)
+        self.sensor = Sensor(cfg["truth"], seed, idx,
+                             float(cfg.get("sensor_noise", 0.0) or 0.0))
         self.truth = cfg["truth"]
         self.nbrs = net.neighbors(cfg["topology"], self.n, idx)
         attack = cfg.get("attack") or "none"
@@ -454,6 +476,39 @@ class Node:
         self.batch_ms = int(cfg.get("batch_ms", 0) or 0)
         self.bq = max(1, self.batch_ms // self.tick_ms) if self.batch_ms else 0
         self.slash = bool(cfg.get("slash", False))
+        self.slash_k = int(cfg.get("slash_window", 1) or 1)   # 1 = v1.2
+        self.true_seq = 0           # сколько общих событий мой сенсор признал верными
+        self.strikes = {}           # обвинитель -> deque(true_seq в момент удара)
+        self.strike_n = {}          # обвинитель -> всего ударов
+        # v1.3: опровержение действует, когда событие опровергли не меньше
+        # refute_quorum разных узлов; 1 = как в v1.2
+        self.quorum = int(cfg.get("refute_quorum", 1) or 1)
+        # и подтверждение тоже (иначе одно шумовое подтверждение лжи весом до
+        # +2 перевешивает опровержения, которым нужен кворум)
+        self.cquorum = int(cfg.get("confirm_quorum", 1) or 1)
+        self.rwait = {}             # (eid, вердикт) -> оценки, ждущие кворума
+        self.applied = {}           # "вердикт@автор" -> применено оценок
+        # v1.3 (Линза): правило приёма - функция от множеств оценщиков
+        # "trust" = Q2 как было; "net-balance": 1 + C - 2R >= 0.5;
+        # "log-odds": C - R >= 0; "sensor-veto": R < 2 и я сам не опроверг
+        self.admit_rule = cfg.get("admit_rule", "trust")
+        self.vset = {}              # eid -> (подтвердившие, опровергшие)
+        # история автора как множество: его события, опровергнутые >= 2 узлами;
+        # от LIAR_K таких событий автор теряет вес (тоже без зависимости от порядка)
+        self.liar_k = int(cfg.get("liar_k", 0) or 0)
+        self.refuted_q = {}         # автор -> множество его eid с R >= 2
+        self.shared_n = {}          # автор -> сколько его общих событий я видел
+        # "all": кворум держит и вес события, и доверие; "trust": первое же
+        # опровержение снимает вес события, доверие автора - только по кворуму
+        self.qscope = cfg.get("quorum_scope", "all")
+        cap = cfg.get("confirm_cap")
+        self.ccap = float(cap) if cap else None   # потолок веса одного подтверждения
+        # v1.3: ответное подтверждение - на опровержение события, которое мой
+        # сенсор видит верным и которое ушло в карантин, отвечаю подтверждением
+        self.rebut = bool(cfg.get("rebut", False))
+        self.rebuttals = 0
+        rcap = cfg.get("refute_cap")
+        self.rcap = float(rcap) if rcap else None # и одного опровержения
         self.codec = (wire.Codec(self.keys_list, [k.author for k in self.keys])
                       if self.bq else None)
         self.outbox = []            # свои события до закрытия пакета
@@ -475,6 +530,24 @@ class Node:
             return False
         if owner_of(ev.key) is not None or a == self.me:
             return True                 # правило владельца: хватает подписи
+        rule = self.admit_rule
+        if rule != "trust":
+            cs, rs = self.vset.get(eid, ((), ()))
+            sl = self.slashed
+            c = sum(1 for x in cs if x not in sl)
+            r = sum(1 for x in rs if x not in sl)
+            nq = len(self.refuted_q.get(a, ()))
+            liar = (self.liar_k and nq >= self.liar_k
+                    and nq >= 0.10 * self.shared_n.get(a, 0))   # доля, не счёт
+            if liar:
+                sl = set(sl) | {a}      # лжец: вес автора 0, без подтверждения не войдёт
+            if rule == "net-balance":
+                return (0 if a in sl else 1) + c - 2 * r >= 0.5
+            if rule == "log-odds":
+                return c - r >= (1 if liar else 0)
+            if rule == "sensor-veto":
+                return r < 2 and self.me not in rs
+            raise ValueError(rule)
         return self.trust[a] + self.vsum.get(eid, 0.0) >= self.THRESH - 1e-9
 
     def apply_validation(self, vev):
@@ -495,6 +568,10 @@ class Node:
         verdict = body.get("verdict")
         if verdict not in ("confirmed", "refuted"):
             return
+        cs, rs = self.vset.setdefault(target.eid, (set(), set()))
+        (cs if verdict == "confirmed" else rs).add(v)
+        if verdict == "refuted" and len(rs) >= 2:
+            self.refuted_q.setdefault(subj, set()).add(target.eid)
         if self.slash and v in self.slashed:
             return
         if (self.slash and verdict == "refuted" and v != self.me
@@ -505,22 +582,67 @@ class Node:
             # Accuser slashing (v1.1): мой собственный сенсор видит, что
             # опровергнутое значение было правдой. Обвинитель лжёт - доверие
             # к нему 0 навсегда, его прошлые оценки отменяются пересчётом.
-            self.slashed[v] = self.clock
-            self.recompute_trust()
-            return
+            if self.slash_k <= 1 or self.strike(v):
+                self.slashed[v] = self.clock
+                self.recompute_trust()
+            elif (self.rebut and subj != self.me
+                  and (self.me, target.eid) not in self.vseen):
+                # v1.3: у меня оно в картине, но у тех, кто не видит ключ,
+                # ушло в карантин - отвечаю подтверждением, один раз
+                self.rebuttals += 1
+                self.emit_validation(target, "confirmed", self.clock)
+            return      # v1.3: ниже порога опровержение просто не учитывается
         ev_in = (body.get("evidence") or {}).get("applied_in")
         bonus = self.EVIDENCE if ev_in else 1.0
-        self.vlog.append((v, target.eid, subj, verdict, bonus))
-        self._apply(v, target.eid, subj, verdict, bonus)
+        rec = (v, target.eid, subj, verdict, bonus)
+        self.vlog.append(rec)
+        self._feed(rec)
 
-    def _apply(self, v, eid, subj, verdict, bonus):
+    def _feed(self, rec):
+        q = self.quorum if rec[3] == "refuted" else self.cquorum
+        if q > 1:
+            split = self.qscope == "trust"
+            if split:
+                self._apply(*rec, part="weight")
+            w = self.rwait.setdefault((rec[1], rec[3]), [])
+            w.append(rec)
+            part = "trust" if split else "both"
+            if len(w) == q:
+                for r in w:
+                    self._apply(*r, part=part)
+            elif len(w) > q:
+                self._apply(*rec, part=part)
+            return
+        self._apply(*rec)
+
+    def strike(self, v):
+        """v1.3: удар обвинителю; True - порог окна пройден, штрафовать."""
+        self.strike_n[v] = self.strike_n.get(v, 0) + 1
+        q = self.strikes.setdefault(v, deque())
+        q.append(self.true_seq)
+        while q and q[0] <= self.true_seq - self.SLASH_WIN:
+            q.popleft()
+        # доля от полного окна: в начале прогона, пока проверено мало, два-три
+        # шумовых удара не должны давать 25 %
+        return len(q) >= self.slash_k and len(q) >= self.SLASH_SHARE * self.SLASH_WIN
+
+    def _apply(self, v, eid, subj, verdict, bonus, part="both"):
+        if part != "weight":
+            k = "%s@%d" % (verdict, subj)
+            self.applied[k] = self.applied.get(k, 0) + 1
         w = self.trust[v] * bonus
         if verdict == "confirmed":
-            self.vsum[eid] = self.vsum.get(eid, 0.0) + w
+            if part != "trust":
+                self.vsum[eid] = self.vsum.get(eid, 0.0) + (
+                    w if self.ccap is None else min(w, self.ccap))
             d = self.CONFIRM * w
         else:
-            self.vsum[eid] = self.vsum.get(eid, 0.0) - w
+            if part != "trust":
+                self.vsum[eid] = self.vsum.get(eid, 0.0) - (
+                    w if self.rcap is None else min(w, self.rcap))
             d = self.REFUTE * w
+        if part == "weight":
+            return
         if subj != self.me and subj not in self.slashed:
             self.trust[subj] = min(1.0, max(0.0, self.trust[subj] + d))
 
@@ -532,12 +654,13 @@ class Node:
         for s in self.slashed:
             self.trust[s] = 0.0
         self.vsum = {}
+        self.rwait = {}
         keep = []
         for rec in self.vlog:
             if rec[0] in self.slashed:
                 continue
             keep.append(rec)
-            self._apply(*rec)
+            self._feed(rec)
         self.vlog = keep
 
     # ------------------------------------------------------------ журнал
@@ -675,6 +798,8 @@ class Node:
         ev.bref = bref
         if kind == "glyph":
             self.fresh["push"].append(ev)
+            if is_shared(ev.key):
+                self.shared_n[a] = self.shared_n.get(a, 0) + 1
             if is_shared(ev.key) and a != self.me:
                 self.on_shared_glyph(ev, now_ms)
         else:
@@ -719,6 +844,8 @@ class Node:
         # опровергаем всегда: ложь, уже вошедшую в картину, надо выбить.
         if self.sensor.covers(ev.key, now_ms):
             ok = self.sensor.check(ev.key, ev.value, ev.hlc[0], now_ms)
+            if ok:
+                self.true_seq += 1
             if ok and not self.admitted(ev.eid):
                 self.emit_validation(ev, "confirmed", now_ms)
             elif not ok:
@@ -1407,5 +1534,9 @@ def run_node(cfg, idx, barrier, counts, q):
         "drift": node.hlc.drift,
         "slashed": {str(v): ms for v, ms in node.slashed.items()},
         "batches_made": node.batches_made,
+        "sensor_flips": node.sensor.flips,
+        "strikes": {str(v): k for v, k in node.strike_n.items()},
+        "applied": node.applied,
+        "rebuttals": node.rebuttals,
     }
     q.put(res)

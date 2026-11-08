@@ -562,3 +562,106 @@ def test_v12_kseq_wire_roundtrip_glyph_and_validation():
     for e in evs:
         assert sn.canon(b.events[e.eid].env) == sn.canon(e.env)
     assert not b.rejects
+
+
+# v1.3 ---------------------------------------------------------------------
+
+def test_v13_sensor_noise_is_deterministic_and_close_to_its_rate():
+    truth = sim.build_world(1, 3, 60_000)["truth"]
+    keys = sorted(k for k in truth if k.endswith(".status"))
+    clean = sn.Sensor(truth, 1, 0)
+    a, b = sn.Sensor(truth, 1, 0, noise=0.05), sn.Sensor(truth, 1, 0, noise=0.05)
+    probes = [(k, sn.truth_at(truth, k, t), t) for k in keys for t in range(1000, 60_000, 500)]
+    ra = [a.check(k, v, t, t + 100) for k, v, t in probes]
+    assert ra == [b.check(k, v, t, t + 100) for k, v, t in probes]   # одно измерение на событие
+    wrong = sum(x != clean.check(k, v, t, t + 100) for x, (k, v, t) in zip(ra, probes))
+    assert 0.02 < wrong / len(probes) < 0.08 and wrong == a.flips
+
+
+def _judge(k=3):
+    truth = sim.build_world(1, 3, 20_000)["truth"]
+    ju = mk_node(2, trust=0.5, truth=truth, slash=True, slash_window=k)
+    return ju
+
+
+def test_v13_window_ignores_sporadic_false_refutations():
+    """Честный с шумом: 3 ложных опровержения на 200 проверенно-верных - не штраф;
+    клеветник, опровергающий четверть и больше, - штраф. Окно 1 = v1.2."""
+    ju = _judge(k=3)
+    ju.true_seq = 1000
+    assert not any(ju.strike(0) for _ in range(3))
+    hits = []
+    for i in range(60):
+        ju.true_seq += 1
+        hits.append(ju.strike(1))
+    assert hits.index(True) == int(sn.Node.SLASH_SHARE * sn.Node.SLASH_WIN) - 1
+    ju.true_seq += 10_000                       # старые удары вышли из окна
+    assert not ju.strike(1)
+
+
+def test_v13_slash_window_1_is_instant_and_k3_waits():
+    for k, want in ((1, True), (3, False)):
+        truth, au, ac, ju = _slash_trio(lambda key, now: True)
+        ju.slash_k = k
+        e = au.gen_own(1000, "sector_1.status",
+                       sn.truth_at(truth, "sector_1.status", 1000), None)
+        ju.accept(e.env, 1100)
+        ac.accept(e.env, 1100)
+        before = ju.trust[0]
+        ac.emit_validation(e, "refuted", 1200)
+        ju.accept(ac.fresh["svc"][-1].env, 1300)
+        assert (1 in ju.slashed) is want
+        assert ju.trust[0] == before            # ложное опровержение не учтено
+
+
+def test_v13_refutation_needs_quorum_of_two():
+    truth = sim.build_world(1, 4, 20_000)["truth"]
+    au, r1, r2, ju = (mk_node(i, n=4, trust=1.0, truth=truth, refute_quorum=2)
+                      for i in range(4))
+    ju.sensor.covers = lambda k, now: False
+    e = au.gen_own(1000, "sector_1.status", "hazard", None)
+    for node in (ju, r1, r2):
+        node.accept(e.env, 1100)
+    r1.emit_validation(e, "refuted", 1200)
+    ju.accept(r1.fresh["svc"][-1].env, 1300)
+    assert ju.trust[0] == 1.0 and ju.admitted(e.eid)      # один голос - шум
+    r2.emit_validation(e, "refuted", 1400)
+    ju.accept(r2.fresh["svc"][-1].env, 1500)
+    assert ju.trust[0] < 1.0 and not ju.admitted(e.eid)   # второй - действует
+
+
+def test_v13_log_odds_admission_does_not_depend_on_vote_order():
+    """Правило Линзы: решение - функция от множеств, порядок голосов не важен."""
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    au, v1, v2, v3 = (mk_node(i, n=5, trust=0.5, truth=truth) for i in range(4))
+    e = au.gen_own(1000, "sector_1.status", "hazard", None)
+    votes = []
+    for node, verdict, t in ((v1, "refuted", 1200), (v2, "confirmed", 1300),
+                             (v3, "refuted", 1400)):
+        node.accept(e.env, 1100)
+        node.emit_validation(e, verdict, t)
+        votes.append(node.fresh["svc"][-1].env)
+    seen = set()
+    for order in ((0, 1, 2), (2, 1, 0), (1, 0, 2)):
+        ju = mk_node(4, n=5, trust=0.5, truth=truth, admit_rule="log-odds")
+        ju.sensor.covers = lambda k, now: False
+        ju.accept(e.env, 1500)
+        for i in order:
+            ju.accept(votes[i], 1600)
+        seen.add(ju.admitted(e.eid))
+    assert seen == {False}                     # 1 подтверждение < 2 опровержений
+
+
+def test_v13_liar_needs_a_share_not_a_count():
+    """Автор с 3 событиями, опровергнутыми кворумом: из 1000 общих - шум, его новое
+    событие принимается; из 20 - лжец, без подтверждения не принимается."""
+    truth = sim.build_world(1, 3, 20_000)["truth"]
+    au = mk_node(0, truth=truth)
+    for shared_n, want in ((1000, True), (20, False)):
+        ju = mk_node(2, truth=truth, admit_rule="log-odds", liar_k=3)
+        ju.sensor.covers = lambda k, now: False
+        e = au.gen_own(1000 + shared_n, "sector_1.status", "hazard", None)
+        ju.accept(e.env, 2000)
+        ju.refuted_q[0] = {"a", "b", "c"}
+        ju.shared_n[0] = shared_n
+        assert ju.admitted(e.eid) is want
