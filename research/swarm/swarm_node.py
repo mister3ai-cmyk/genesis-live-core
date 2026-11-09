@@ -498,6 +498,12 @@ class Node:
         self.liar_gap = int(lg) if lg is not None else None
         self.lie_bad = {}           # автор -> множество eid с R >= 2
         self.tomb_events = []
+        # v2.2 быстрая полоса: опровержение - сразу отдельным пакетом из одного
+        # события (своя подпись, ~120 B), не дожидаясь кванта 500 мс; не больше
+        # fast_quota за 500 мс на узел, остальное - в обычный пакет
+        self.fast_quota = int(cfg.get("fast_refute", 0) or 0)
+        self.fast_times = deque()
+        self.fast_sent = 0
         if self.anis:
             self.slash = True
             self.apsa = APSASanitaryAudit(
@@ -1043,7 +1049,10 @@ class Node:
         self.clock = now_ms
         env = self.new_env("validation", body)
         vev = self.store(env, self.me, now_ms)
-        self.emit(vev, "svc")
+        if verdict == "refuted" and self.fast_quota and self.bq and self.fast_ok(now_ms):
+            self.emit_fast(vev)
+        else:
+            self.emit(vev, "svc")
         self.validations_sent += 1
         if label:
             self.attack_log.append((label, vev.eid[7:23], ev.key, "", now_ms))
@@ -1218,6 +1227,28 @@ class Node:
             self.outbox.append(ev)
         else:
             self.fresh[cls].append(ev)
+
+    def fast_ok(self, now_ms):
+        while self.fast_times and self.fast_times[0] <= now_ms - 500:
+            self.fast_times.popleft()
+        if len(self.fast_times) >= self.fast_quota:
+            return False
+        self.fast_times.append(now_ms)
+        return True
+
+    def emit_fast(self, ev):
+        """v2.2: пакет из одного события, уходит на ближайшем такте."""
+        hlc = [ev.hlc[0], ev.hlc[1]]
+        leaves = [bytes.fromhex(ev.eid[7:])]
+        root, sig = self.sign_batch(self.me, leaves, hlc)
+        bkey = (self.me, root)
+        self.batches[bkey] = {"aidx": self.me, "n": 1, "hlc": hlc, "sig": sig,
+                              "leaves": leaves, "proofs": {}, "eids": {}}
+        self.verified.add(bkey)
+        ev.bref = (bkey, 0)
+        self.fresh["push"].append(ev)
+        self.batches_made += 1
+        self.fast_sent += 1
 
     def sign_batch(self, aidx, leaves, hlc):
         root = wire.merkle_root(leaves)
@@ -1757,6 +1788,7 @@ def run_node(cfg, idx, barrier, counts, q):
         "rebuttals": node.rebuttals,
         "replays": node.replays,
         "thymus_blocked": node.tombs.blocked if node.anis else 0,
+        "fast_sent": node.fast_sent,
         "tombs": [[e.author, e.env["body"]["target"], e.env["body"].get("src"), e.env["body"].get("s"), e.arrival]
                   for e in node.tomb_events if e.author == idx],
         # v1.4: журнал к концу прогона - сколько записей каждого автора у меня есть

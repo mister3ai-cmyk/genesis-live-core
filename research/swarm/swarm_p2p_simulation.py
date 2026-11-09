@@ -54,7 +54,8 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 vote_order="arrival", sensor_filter=True,   # v1.4
                 self_trust="full", pull_priority="log", pull_quiet_cap=0,
                 self_admit="always", arbiter="scalar", kinematic_gate=0,   # v2.0
-                apsa_rule=None, tomb_gap=20, liar_vote=False, liar_win=50, liar_gap=2, apsa_window="event")   # v2.1
+                apsa_rule=None, tomb_gap=20, liar_vote=False, liar_win=50, liar_gap=2, apsa_window="event",   # v2.1
+                fast_refute=0)                                 # v2.2
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -170,7 +171,8 @@ def run_once(cfg):
                 arbiter=cfg["arbiter"], kinematic_gate=cfg["kinematic_gate"],
                 apsa_rule=cfg["apsa_rule"], tomb_gap=cfg["tomb_gap"],
                 liar_vote=cfg["liar_vote"], liar_win=cfg["liar_win"],
-                liar_gap=cfg["liar_gap"], apsa_window=cfg["apsa_window"])
+                liar_gap=cfg["liar_gap"], apsa_window=cfg["apsa_window"],
+                fast_refute=cfg["fast_refute"])
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -253,6 +255,8 @@ def run_once(cfg):
         rec["liar_gap"] = cfg["liar_gap"]
     if cfg["apsa_window"] != "arrival":
         rec["apsa_window"] = cfg["apsa_window"]
+    if cfg["fast_refute"]:
+        rec["fast_refute"] = cfg["fast_refute"]
     if cfg["arbiter"] != "scalar":
         rec["tomb_gap"] = cfg["tomb_gap"]
     rec["metrics"] = m
@@ -483,6 +487,7 @@ def compute_metrics(cfg, world, results):
     m["slashed_attacker_by"] = sum(1 for (_, v, _) in sl if v not in honest)
     m["sensor_flips"] = sum(results[i].get("sensor_flips", 0) for i in honest)
     m["thymus_blocked"] = sum(results[i].get("thymus_blocked", 0) for i in honest)
+    m["fast_sent"] = sum(results[i].get("fast_sent", 0) for i in range(n))
     # v1.4 шаг 0: совпадают ли множества голосов и решения о приёме у честных
     vs = [results[i].get("vstate") for i in honest]
     if all(v is not None for v in vs):
@@ -778,6 +783,8 @@ def run_grid(cfgs, out, workers, extra):
                 rec["liar_gap"] = dict(DEFAULTS, **c)["liar_gap"]
             if dict(DEFAULTS, **c)["apsa_window"] != "arrival":
                 rec["apsa_window"] = dict(DEFAULTS, **c)["apsa_window"]
+            if dict(DEFAULTS, **c)["fast_refute"]:
+                rec["fast_refute"] = dict(DEFAULTS, **c)["fast_refute"]
             if dict(DEFAULTS, **c)["arbiter"] != "scalar":
                 rec["tomb_gap"] = dict(DEFAULTS, **c)["tomb_gap"]
             for q in ("confirm_cap", "refute_cap", "rebut"):
@@ -829,7 +836,8 @@ def _cfg_key(r):
                                                   r.get("liar_vote", False),
                                                   r.get("liar_win", 200),
                                                   r.get("liar_gap"),
-                                                  r.get("apsa_window", "arrival"))
+                                                  r.get("apsa_window", "arrival"),
+                                                  r.get("fast_refute", 0))
 
 
 # ------------------------------------------------------------------- отчёт
@@ -1197,6 +1205,8 @@ def main():
                     help="v2.0: пауза второй фазы для лжеца, в его событиях (по умолчанию tomb-gap // 2)")
     ap.add_argument("--apsa-window", default="event", choices=("arrival", "event"),
                     help="v2.1: окно обвинителя по времени прихода ударов (v2.0) или по самим событиям")
+    ap.add_argument("--fast-refute", type=int, default=0,
+                    help="v2.2: быстрая полоса - до N опровержений за 500 мс сразу отдельным пакетом (0 = выкл)")
     ap.add_argument("--rebut", action="store_true",
                     help="v1.3: отвечать подтверждением на опровержение того, что мой сенсор видит верным")
     ap.add_argument("--no-slot-digest", action="store_true",
@@ -1241,6 +1251,7 @@ def main():
     extra["liar_win"] = a.liar_win
     extra["liar_gap"] = a.liar_gap
     extra["apsa_window"] = a.apsa_window
+    extra["fast_refute"] = a.fast_refute
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return

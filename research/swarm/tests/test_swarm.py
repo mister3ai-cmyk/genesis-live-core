@@ -845,3 +845,26 @@ def test_v21_event_window_ignores_late_burst_of_old_refutations():
     for i in range(60):                          # клеветник: 30 % событий окна
         a.false_refutation(4, 2000, "e%d" % i)
     assert a.verdict(4, 9000)[0] == apsa.INTENTIONAL
+
+
+def test_v22_fast_refute_quota_and_single_event_batch_verifies():
+    """v2.2: опровержение уходит сразу пакетом из одного события, не больше
+    квоты за 500 мс; остальное - в обычный пакет. Получатель проверяет подпись
+    пакета из одного листа так же, как обычного."""
+    a = _batch_node(0, fast_refute=1)
+    g1 = a.gen_own(1000, "target_1.pos", [100, 7], None)
+    g2 = a.gen_own(1010, "target_2.pos", [200, 7], None)
+    g3 = a.gen_own(1020, "target_1.pos", [300, 7], None)
+    a.emit_validation(g1, "refuted", 1100)       # быстрая полоса
+    a.emit_validation(g2, "refuted", 1200)       # квота 1 за 500 мс исчерпана
+    a.emit_validation(g3, "refuted", 1700)       # окно сдвинулось - снова быстро
+    assert a.fast_sent == 2
+    fast = [e for e in a.fresh["push"] if e.kind == "validation"]
+    assert len(fast) == 2 and all(a.batches[e.bref[0]]["n"] == 1 for e in fast)
+    assert any(e.kind == "validation" for e in a.outbox)   # второе ждёт пакета
+    b = _batch_node(1)
+    _deliver(b, a.encode_events(fast))
+    assert all(e.eid in b.events for e in fast) and not b.rejects
+    off = _batch_node(0)
+    off.emit_validation(off.gen_own(1000, "target_1.pos", [1, 7], None), "refuted", 1100)
+    assert off.fast_sent == 0 and not any(e.kind == "validation" for e in off.fresh["push"])
