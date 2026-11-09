@@ -166,13 +166,21 @@ class Codec:
                 raise ValueError("glyph_hash")
             out.append(2 + ks)
             out += bytes.fromhex(gh[7:])
-            out.append(("confirmed", "refuted").index(body["verdict"]))
             evd = body["evidence"]
             ai = evd.get("applied_in")
-            if set(evd) != {"applied_in", "note"} or evd["note"] is not None \
-                    or not ai.startswith("sensor:"):
+            note = evd.get("note")
+            if set(evd) != {"applied_in", "note"} or not ai.startswith("sensor:") \
+                    or not (note is None or (isinstance(note, list) and len(note) == 2
+                            and all(isinstance(x, int) and not isinstance(x, bool)
+                                    for x in note))):
                 raise ValueError("evidence")
+            # v3: бит 2 - в голосе измерение [x, y]
+            out.append(("confirmed", "refuted").index(body["verdict"])
+                       | (2 if note is not None else 0))
             out.append(self.kidx[ai[7:]])
+            if note is not None:
+                _sv(out, note[0])
+                _sv(out, note[1])
         else:
             raise ValueError("kind %r" % kind)
         _sv(out, hl - bl)
@@ -214,12 +222,20 @@ class Codec:
             if len(gh) != 71:
                 raise ValueError("short hash")
             p += 32
-            verdict = ("confirmed", "refuted")[d[p]]
+            if d[p] > 3:
+                raise ValueError("verdict")
+            verdict = ("confirmed", "refuted")[d[p] & 1]
+            has = d[p] & 2
             key = self.keys[d[p + 1]]
             p += 2
+            note = None
+            if has:
+                x, p = _rsv(d, p)
+                y, p = _rsv(d, p)
+                note = [x, y]
             kind, body = "validation", {
                 "glyph_hash": gh, "verdict": verdict,
-                "evidence": {"applied_in": "sensor:" + key, "note": None}}
+                "evidence": {"applied_in": "sensor:" + key, "note": note}}
         else:
             raise ValueError("event type")
         dl, p = _rsv(d, p)

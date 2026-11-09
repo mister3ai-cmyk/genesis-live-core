@@ -43,6 +43,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 import swarm_net as net
 import swarm_wire as wire
 from apsa_engine import APSASanitaryAudit, INTENTIONAL
+import marzullo as mz
 from tombstone_registry import TombstoneRegistry
 
 GEP = "0.1"
@@ -50,6 +51,10 @@ STATUSES = ("clear", "obstacle", "hazard", "unknown")
 N_SECTORS = 16
 N_TARGETS = 4
 ATTACK_START_MS = 60_000
+# v3 (Шаг 3): окно источников, полуширина измерения и запас на движение цели
+MZ_W_MS = 1_000                 # заявки других авторов ближе 1 с к событию
+MZ_H = 150                      # ±3σ шума ±50 у автора и у измерения, с запасом
+MZ_D = 1_600                    # истина меняется шагами до 1 500 по оси
 T5_WINDOW_MS = 60_000           # флуд x50 идёт 60 с: дольше сетка не влезает в час
 MAX_FUTURE_MS = 10_000          # HLC: событие из будущего дальше - отказ
 FP_WAIT_MS = 5_000              # карантин дольше - ложное срабатывание
@@ -322,10 +327,13 @@ class Sensor:
     WINDOW_MS = 5_000
     POS_TOL = 300
 
-    def __init__(self, truth, seed, idx, noise=0.0):
+    def __init__(self, truth, seed, idx, noise=0.0, model="flip"):
         self.truth, self.seed, self.idx = truth, seed, idx
         self.noise = noise      # v1.3: доля измерений с неверным вердиктом
         self.flips = 0
+        # v3: "flip" - сбой переворачивает вердикт (v1.3); "interval" - сбой
+        # сдвигает само измерение (координата на 3 000-5 000, статус - другой)
+        self.model = model
 
     def covers(self, key, now_ms):
         h = hashlib.sha256(("cov:%s:%d:%s:%d" % (
@@ -338,17 +346,48 @@ class Sensor:
         j = bisect_right(times, max(hi, lo))
         return vals[i:max(j, i + 1)]
 
+    def gross(self, key, value, hlc_l):
+        # v1.3: одно измерение на событие - повторная проверка того же
+        # события даёт тот же ответ (зерно, узел, ключ, значение, hlc)
+        if not self.noise:
+            return False
+        h = hashlib.sha256(("noise:%s:%d:%s:%r:%d" % (
+            self.seed, self.idx, key, value, hlc_l)).encode()).digest()
+        return int.from_bytes(h[:4], "big") < self.noise * 2 ** 32
+
     def check(self, key, value, hlc_l, now_ms):
+        if self.model == "interval":
+            if not self.gross(key, value, hlc_l):
+                return self._check(key, value, hlc_l, now_ms)
+            self.flips += 1
+            r = self.reading(key, value, hlc_l)
+            if key.endswith(".status"):
+                return value == r
+            try:
+                return max(abs(value[0] - r[0]), abs(value[1] - r[1])) <= self.POS_TOL
+            except (TypeError, IndexError):
+                return False
         ok = self._check(key, value, hlc_l, now_ms)
-        if self.noise:
-            # v1.3: одно измерение на событие - повторная проверка того же
-            # события даёт тот же ответ (зерно, узел, ключ, значение, hlc)
-            h = hashlib.sha256(("noise:%s:%d:%s:%r:%d" % (
-                self.seed, self.idx, key, value, hlc_l)).encode()).digest()
-            if int.from_bytes(h[:4], "big") < self.noise * 2 ** 32:
-                self.flips += 1
-                return not ok
+        if self.gross(key, value, hlc_l):
+            self.flips += 1
+            return not ok
         return ok
+
+    def reading(self, key, value, hlc_l):
+        """v3: измерение в момент события: истина ± 50 по оси; при грубом сбое -
+        сдвиг 3 000-5 000 по каждой оси (как у лжи T4), у статуса - другой."""
+        tv = truth_at(self.truth, key, hlc_l)
+        h = hashlib.sha256(("rd:%s:%d:%s:%r:%d" % (
+            self.seed, self.idx, key, value, hlc_l)).encode()).digest()
+        bad = self.gross(key, value, hlc_l)
+        if key.endswith(".status"):
+            return STATUSES[(STATUSES.index(tv) + 1 + h[0] % 3) % 4] if bad else tv
+        x = [tv[0] + h[0] % 101 - 50, tv[1] + h[1] % 101 - 50]
+        if bad:
+            for i in (0, 1):
+                x[i] += ((1 if h[2 + i] & 1 else -1)
+                         * (3000 + int.from_bytes(h[4 + 2 * i:6 + 2 * i], "big") % 2001))
+        return x
 
     def _check(self, key, value, hlc_l, now_ms):
         cand = self.values_in(key, hlc_l - self.WINDOW_MS,
@@ -447,7 +486,8 @@ class Node:
         self.by_kseq = set()                        # (автор, вид, kseq)
         self.seq_lead = {}      # автор -> max(seq - SEQ_RATE*(сек HLC + 1))
         self.sensor = Sensor(cfg["truth"], seed, idx,
-                             float(cfg.get("sensor_noise", 0.0) or 0.0))
+                             float(cfg.get("sensor_noise", 0.0) or 0.0),
+                             cfg.get("sensor_model") or "flip")
         self.truth = cfg["truth"]
         self.nbrs = net.neighbors(cfg["topology"], self.n, idx)
         attack = cfg.get("attack") or "none"
@@ -504,6 +544,16 @@ class Node:
         self.fast_quota = int(cfg.get("fast_refute", 0) or 0)
         self.fast_times = deque()
         self.fast_sent = 0
+        # v3 (Шаг 3): приём по Марзулло (координаты) и по согласию (статусы).
+        # Решение - функция журнала: заявок других авторов и измерений в
+        # голосах; свой датчик в приёме не участвует (урок v1.4, P2)
+        self.mz_f = int(cfg.get("marzullo", 0) or 0)
+        self.status_prior = bool(cfg.get("status_prior", False))
+        self.claims = {}            # общий ключ -> [(hlc_l, hlc_c, автор, eid, значение)]
+        self.vmeas = {}             # eid -> {голосующий: измерение}
+        self.mz_cache = {}          # eid -> (версия данных, решение)
+        self.mz_suppressed = 0      # не опроверг: в меньшинстве мой датчик
+        self.false_ref = {"pos": 0, "status": 0}   # инструментовка: опровергнута правда
         if self.anis:
             self.slash = True
             self.apsa = APSASanitaryAudit(
@@ -597,6 +647,8 @@ class Node:
             sus = self.tombs.is_suspect
             c = sum(1 for x in cs if x not in sl and not sus(x))
             r = sum(1 for x in rs if x not in sl and not sus(x))
+            if (self.mz_f or self.status_prior) and self.phys(ev) == mz.REFUTED:
+                return c >= 1 and c >= r    # против согласия - ждёт подтверждения
             return r < 2 or c >= r
         rule = self.admit_rule
         if rule != "trust":
@@ -636,6 +688,9 @@ class Node:
         verdict = body.get("verdict")
         if verdict not in ("confirmed", "refuted"):
             return
+        meas = (body.get("evidence") or {}).get("note")
+        if isinstance(meas, list) and len(meas) == 2:
+            self.vmeas.setdefault(target.eid, {})[v] = meas
         cs, rs = self.vset.setdefault(target.eid, (set(), set()))
         (cs if verdict == "confirmed" else rs).add(v)
         if (self.anis and self.liar_vote and verdict == "refuted" and len(rs) == 2
@@ -801,6 +856,9 @@ class Node:
             self.mark_seq(a, ev.seq)
         if ev.kind == "glyph":
             self.table.add(ev.key, ev.eid, ev.value, ev.hlc, a)
+            if is_shared(ev.key) and isinstance(ev.hlc, list):
+                insort(self.claims.setdefault(ev.key, []),
+                       (ev.hlc[0], ev.hlc[1], a, ev.eid, ev.value))
             for vev in self.vpending.pop(ev.eid, ()):
                 self.apply_validation(vev)
         elif ev.kind == "validation":
@@ -996,13 +1054,20 @@ class Node:
         # опровергаем всегда: ложь, уже вошедшую в картину, надо выбить.
         if self.sensor.covers(ev.key, now_ms):
             ok = self.sensor.check(ev.key, ev.value, ev.hlc[0], now_ms)
-            if ok:
+            if (not ok and self.mz_f and ev.key.endswith(".pos")
+                    and self.phys(ev) == mz.CONSISTENT):
+                # мой датчик против согласия остальных источников - сбой мой
+                self.mz_suppressed += 1
+                ok = None
+            if ok is None:
+                pass
+            elif ok:
                 self.true_seq += 1
                 if self.anis:
                     self.apsa.saw_true(now_ms, ev.eid)
             if ok and not self.admitted(ev.eid):
                 self.emit_validation(ev, "confirmed", now_ms)
-            elif not ok:
+            elif ok is False:
                 self.emit_validation(ev, "refuted", now_ms)
         if self.admitted(ev.eid):
             self.fp_records.append((ev.eid[7:23], ev.author, now_ms, 0))
@@ -1042,8 +1107,19 @@ class Node:
             self.bury("aut", a, sv, 10, self.kin_n[a])
 
     def emit_validation(self, ev, verdict, now_ms, label=None):
+        note = None
+        if self.sensor.model == "interval" and ev.key.endswith(".pos"):
+            if label == "T7":       # клеветник прикладывает выдуманное измерение
+                tv = truth_at(self.truth, ev.key, ev.hlc[0])
+                note = [tv[i] + self.lie_rng.choice((-1, 1)) * self.lie_rng.randint(3000, 5000)
+                        for i in (0, 1)]
+            else:
+                note = self.sensor.reading(ev.key, ev.value, ev.hlc[0])
+        if (verdict == "refuted" and not self.is_attacker
+                and self.sensor._check(ev.key, ev.value, ev.hlc[0], now_ms)):
+            self.false_ref["pos" if ev.key.endswith(".pos") else "status"] += 1
         body = {"glyph_hash": ev.eid, "verdict": verdict,
-                "evidence": {"applied_in": "sensor:" + ev.key, "note": None},
+                "evidence": {"applied_in": "sensor:" + ev.key, "note": note},
                 "hlc": self.hlc.now(now_ms), "node": self.me,
                 **self.seqs("validation")}
         self.clock = now_ms
@@ -1227,6 +1303,57 @@ class Node:
             self.outbox.append(ev)
         else:
             self.fresh[cls].append(ev)
+
+    def phys(self, ev):
+        """v3: заявка ev против источников S - по одному на другой узел:
+        его измерение в голосе по ev, иначе его заявка о том же ключе,
+        ближайшая по HLC в пределах MZ_W_MS. Похороненные и подозреваемые
+        не в счёт. Координата - Марзулло с допуском f = max(mz_f, (m - 1) // 2);
+        статус - согласие (последние заявки >= 2 других авторов до события
+        против него) и ни одной заявки за него в окне."""
+        pos = ev.key.endswith(".pos")
+        if not self.anis or not isinstance(ev.hlc, list) or (pos and not self.mz_f) \
+                or (not pos and not self.status_prior):
+            return mz.UNDECIDED
+        lst = self.claims.get(ev.key, ())
+        vm = self.vmeas.get(ev.eid, {})
+        ver = (len(lst), len(vm), len(self.slashed), len(self.tombs.suspect))
+        hit = self.mz_cache.get(ev.eid)
+        if hit is not None and hit[0] == ver:
+            return hit[1]
+        t, a = ev.hlc[0], ev.author
+        out = lambda b: b == a or b in self.slashed or self.tombs.is_suspect(b)
+        near, prior, backed = {}, {}, False
+        for (l, c, b, eid, val) in lst[bisect_left(lst, (t - MZ_W_MS,)):]:
+            if l > t + MZ_W_MS:
+                break
+            if out(b):
+                continue
+            d = abs(l - t)
+            if b not in near or d < near[b][0]:
+                near[b] = (d, val)
+            backed = backed or val == ev.value      # статус: кто-то ещё за него
+            if l <= t:
+                prior[b] = val                      # статус: последняя до события
+        res = mz.UNDECIDED
+        try:
+            if pos:
+                src = {b: v for b, (_, v) in near.items()}
+                src.update((b, v) for b, v in vm.items() if not out(b))
+                # допуск растёт с числом источников до границы BFT: m = |S| + 1
+                f = max(self.mz_f, len(src) // 2)
+                res = mz.judge(mz.box(ev.value, MZ_H),
+                               [mz.box(v, MZ_H + MZ_D) for v in src.values()], f)
+            else:
+                vals = list(prior.values())
+                if backed:
+                    res = mz.CONSISTENT
+                elif any(vals.count(v) >= 2 for v in vals):
+                    res = mz.REFUTED
+        except (TypeError, IndexError, ValueError):
+            res = mz.UNDECIDED
+        self.mz_cache[ev.eid] = (ver, res)
+        return res
 
     def fast_ok(self, now_ms):
         while self.fast_times and self.fast_times[0] <= now_ms - 500:
@@ -1789,6 +1916,8 @@ def run_node(cfg, idx, barrier, counts, q):
         "replays": node.replays,
         "thymus_blocked": node.tombs.blocked if node.anis else 0,
         "fast_sent": node.fast_sent,
+        "mz_suppressed": node.mz_suppressed,
+        "false_ref": node.false_ref,
         "tombs": [[e.author, e.env["body"]["target"], e.env["body"].get("src"), e.env["body"].get("s"), e.arrival]
                   for e in node.tomb_events if e.author == idx],
         # v1.4: журнал к концу прогона - сколько записей каждого автора у меня есть

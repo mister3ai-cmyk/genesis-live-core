@@ -868,3 +868,175 @@ def test_v22_fast_refute_quota_and_single_event_batch_verifies():
     off = _batch_node(0)
     off.emit_validation(off.gen_own(1000, "target_1.pos", [1, 7], None), "refuted", 1100)
     assert off.fast_sent == 0 and not any(e.kind == "validation" for e in off.fresh["push"])
+
+
+# ------------------------------------------------------------ v3: Марзулло
+
+import marzullo as mz                                        # noqa: E402
+
+
+def test_v3_marzullo_judge_matches_brute_force_on_random_1d():
+    """judge = критерий Марзулло: истина в точке, покрытой >= m - f
+    интервалами. Сверка с перебором целых точек на случайных отрезках."""
+    rng = random.Random(7)
+    for _ in range(3000):
+        s = rng.randint(1, 4)
+        iv = []
+        for _ in range(s + 1):
+            c, h = rng.randint(0, 40), rng.randint(0, 6)
+            iv.append([(c - h, c + h)])
+        e, src = iv[0], iv[1:]
+        pts = range(-10, 51)
+        cover = lambda p, b: b[0][0] <= p <= b[0][1]
+        m = s + 1
+        if s < 2:
+            want = mz.UNDECIDED
+        elif any(cover(p, e) and 1 + sum(cover(p, b) for b in src) >= m - 1 for p in pts):
+            want = mz.CONSISTENT
+        elif any(sum(cover(p, b) for b in src) >= m - 1 for p in pts):
+            want = mz.REFUTED
+        else:
+            want = mz.UNDECIDED
+        assert mz.judge(e, src, 1) == want, (e, src)
+
+
+def test_v3_marzullo_box_tolerates_one_faulty_source():
+    e_true, e_lie = mz.box([1000, 1000], 150), mz.box([5000, 5000], 150)
+    honest = [mz.box([1100, 900], 1750), mz.box([2200, 1300], 1750)]
+    gross = mz.box([4600, -2500], 1750)
+    assert mz.judge(e_lie, honest, 1) == mz.REFUTED
+    assert mz.judge(e_true, honest, 1) == mz.CONSISTENT
+    assert mz.judge(e_true, honest + [gross], 1) == mz.CONSISTENT   # один сбойный
+    assert mz.judge(e_lie, honest[:1], 1) == mz.UNDECIDED           # m < 3
+
+
+def test_v3_vote_with_measurement_wire_roundtrip():
+    a = _batch_node(0, sensor_model="interval")
+    g = a.gen_own(1000, "target_1.pos", [123456, 7], None)
+    s = a.gen_own(1010, "sector_1.status", "hazard", None)
+    a.emit_validation(g, "refuted", 1030)
+    a.emit_validation(s, "refuted", 1040)
+    a.close_batch()
+    evs = a.fresh["push"]
+    notes = [e.env["body"]["evidence"]["note"] for e in evs if e.kind == "validation"]
+    assert isinstance(notes[0], list) and len(notes[0]) == 2 and notes[1] is None
+    b = _batch_node(1)
+    _deliver(b, a.encode_events(evs))
+    for e in evs:
+        assert sn.canon(b.events[e.eid].env) == sn.canon(e.env)
+
+
+def test_v3_interval_sensor_is_deterministic_and_gross_error_shifts_reading():
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    s = sn.Sensor(truth, 1, 2, noise=0.5, model="interval")
+    tv = sn.truth_at(truth, "target_0.pos", 5000)
+    seen = {"ok": 0, "gross": 0}
+    for v in range(200):
+        val = [tv[0] + v % 7, tv[1]]
+        r1, r2 = s.reading("target_0.pos", val, 5000), s.reading("target_0.pos", val, 5000)
+        assert r1 == r2
+        d = max(abs(r1[0] - tv[0]), abs(r1[1] - tv[1]))
+        if s.gross("target_0.pos", val, 5000):
+            assert 2950 <= d <= 5050
+            seen["gross"] += 1
+        else:
+            assert d <= 50
+            seen["ok"] += 1
+    assert seen["ok"] > 50 and seen["gross"] > 50
+
+
+def _mz_world():
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    k = "target_1.pos"
+    t = next(t for t in range(2000, 20_000, 100)
+             if sn.truth_at(truth, k, t - 1200) == sn.truth_at(truth, k, t + 1200))
+    return truth, k, t, sn.truth_at(truth, k, t)
+
+
+def test_v3_marzullo_admission_blocks_pos_lie_on_arrival_and_ignores_own_sensor():
+    """Ложь о координате при двух свежих заявках других авторов не входит в
+    картину сразу, без голосов. Решение одинаково у узлов с разными датчиками
+    (один - со 100 % сбоев) и не зависит от порядка прихода заявок."""
+    truth, k, t, tv = _mz_world()
+    authors = [mk_node(i, n=5, truth=truth) for i in range(5)]
+    h1 = authors[1].gen_own(t - 300, k, [tv[0] + 40, tv[1] - 30], None)
+    h2 = authors[2].gen_own(t - 200, k, [tv[0] - 20, tv[1] + 10], None)
+    lie = authors[4].gen_own(t, k, [tv[0] + 3500, tv[1] - 4200], None)
+    hon = authors[3].gen_own(t + 50, k, [tv[0] + 10, tv[1] + 10], None)
+    out = []
+    for idx, noise, order in ((0, 0.0, (h1, h2, lie, hon)), (0, 1.0, (hon, lie, h2, h1))):
+        ju = mk_node(idx, n=5, truth=truth, arbiter="anis", marzullo=1,
+                     sensor_model="interval", sensor_noise=noise)
+        for e in order:
+            assert ju.accept(e.env, t + 500) is not None
+        out.append((ju.admitted(lie.eid), ju.admitted(hon.eid)))
+    assert out == [(False, True), (False, True)]
+
+
+def test_v3_marzullo_off_keeps_v22_admission():
+    truth, k, t, tv = _mz_world()
+    authors = [mk_node(i, n=5, truth=truth) for i in range(5)]
+    evs = [authors[1].gen_own(t - 300, k, list(tv), None),
+           authors[2].gen_own(t - 200, k, list(tv), None),
+           authors[4].gen_own(t, k, [tv[0] + 3500, tv[1] - 4200], None)]
+    ju = mk_node(0, n=5, truth=truth, arbiter="anis")
+    for e in evs:
+        ju.accept(e.env, t + 500)
+    assert ju.admitted(evs[2].eid)          # без голосов v2.2 пускает
+
+
+def test_v3_status_prior_defers_change_until_corroborated():
+    """Вариант B: новый статус против согласия двух других авторов ждёт;
+    вторая заявка того же значения другим автором снимает отсрочку."""
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    k = "sector_3.status"
+    au = [mk_node(i, n=5, truth=truth) for i in range(5)]
+    ju = mk_node(0, n=5, truth=truth, arbiter="anis", status_prior=True)
+    ju.sensor.covers = lambda key, now: False       # судья сам не голосует
+    for e in (au[1].gen_own(4000, k, "clear", None), au[2].gen_own(4100, k, "clear", None)):
+        ju.accept(e.env, 4300)
+    new = au[3].gen_own(4400, k, "hazard", None)
+    ju.accept(new.env, 4500)
+    assert not ju.admitted(new.eid)
+    ju.accept(au[2].gen_own(4700, k, "hazard", None).env, 4800)
+    assert ju.admitted(new.eid)
+
+
+def test_v3_validator_suppresses_own_gross_error():
+    """Мой датчик со 100 % сбоев против двух согласных заявок - опровержение
+    не отправляется, счётчик подавленных растёт."""
+    truth, k, t, tv = _mz_world()
+    au = [mk_node(i, n=5, truth=truth) for i in range(5)]
+    ju = mk_node(0, n=5, truth=truth, arbiter="anis", marzullo=1,
+                 sensor_model="interval", sensor_noise=1.0)
+    ju.sensor.covers = lambda key, now: True
+    for i, dt in ((1, -300), (2, -200)):
+        ju.accept(au[i].gen_own(t + dt, k, [tv[0] + 5 * i, tv[1]], None).env, t)
+    e = au[3].gen_own(t, k, [tv[0], tv[1] + 20], None)
+    sent = ju.validations_sent
+    ju.accept(e.env, t + 100)                       # приём сам зовёт проверку
+    assert ju.mz_suppressed == 1 and ju.validations_sent == sent
+
+
+# v3.0 release -------------------------------------------------------------
+
+# Отпечаток прогона ниже, снятый на main f620f41 (v2.2) и совпавший с v3 при flip/0.
+V22_ANIS_T4_FP = "d3870e0858f7b78b7675e4fe16efb53cf9cb24ddacdaec8a9537443b31a84a24"
+
+
+def test_v3_flip_and_marzullo_off_reproduce_v22_byte_for_byte():
+    cfg = dict(n=5, duration_s=30, events_until_s=20, seed=2, loss=0.05,
+               attack="T4", base_port=23400, arbiter="anis", rebut=True,
+               liar_vote=True, pull_priority="validations", pull_quiet_cap=96,
+               sensor_noise=0.05, sensor_model="flip", marzullo=0)
+    rec, res = sim.run_once(cfg)
+    fp = hashlib.sha256(repr(_fingerprint(res)).encode()).hexdigest()
+    assert fp == V22_ANIS_T4_FP
+    assert rec["metrics"]["converged"]
+
+
+def test_v3_cli_defaults_turn_on_marzullo_only_for_anis():
+    assert sim._v3_defaults("anis") == ("interval", 1)
+    assert sim._v3_defaults("anis-literal") == ("interval", 1)
+    assert sim._v3_defaults("scalar") == ("flip", 0)
+    assert sim._v3_defaults("anis", "flip", 0) == ("flip", 0)        # явное не трогаем
