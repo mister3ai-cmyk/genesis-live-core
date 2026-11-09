@@ -54,7 +54,7 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 vote_order="arrival", sensor_filter=True,   # v1.4
                 self_trust="full", pull_priority="log", pull_quiet_cap=0,
                 self_admit="always", arbiter="scalar", kinematic_gate=0,   # v2.0
-                apsa_rule=None, tomb_gap=20, liar_vote=False)
+                apsa_rule=None, tomb_gap=20, liar_vote=False, liar_win=50, liar_gap=2, apsa_window="event")   # v2.1
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -169,7 +169,8 @@ def run_once(cfg):
                 pull_quiet_cap=cfg["pull_quiet_cap"], self_admit=cfg["self_admit"],
                 arbiter=cfg["arbiter"], kinematic_gate=cfg["kinematic_gate"],
                 apsa_rule=cfg["apsa_rule"], tomb_gap=cfg["tomb_gap"],
-                liar_vote=cfg["liar_vote"])
+                liar_vote=cfg["liar_vote"], liar_win=cfg["liar_win"],
+                liar_gap=cfg["liar_gap"], apsa_window=cfg["apsa_window"])
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -246,6 +247,12 @@ def run_once(cfg):
         rec["apsa_rule"] = cfg["apsa_rule"]
     if cfg["liar_vote"]:
         rec["liar_vote"] = True
+    if cfg["liar_win"] != 200:
+        rec["liar_win"] = cfg["liar_win"]
+    if cfg["liar_gap"] is not None:
+        rec["liar_gap"] = cfg["liar_gap"]
+    if cfg["apsa_window"] != "arrival":
+        rec["apsa_window"] = cfg["apsa_window"]
     if cfg["arbiter"] != "scalar":
         rec["tomb_gap"] = cfg["tomb_gap"]
     rec["metrics"] = m
@@ -765,6 +772,12 @@ def run_grid(cfgs, out, workers, extra):
                 rec["apsa_rule"] = dict(DEFAULTS, **c)["apsa_rule"]
             if dict(DEFAULTS, **c)["liar_vote"]:
                 rec["liar_vote"] = True
+            if dict(DEFAULTS, **c)["liar_win"] != 200:
+                rec["liar_win"] = dict(DEFAULTS, **c)["liar_win"]
+            if dict(DEFAULTS, **c)["liar_gap"] is not None:
+                rec["liar_gap"] = dict(DEFAULTS, **c)["liar_gap"]
+            if dict(DEFAULTS, **c)["apsa_window"] != "arrival":
+                rec["apsa_window"] = dict(DEFAULTS, **c)["apsa_window"]
             if dict(DEFAULTS, **c)["arbiter"] != "scalar":
                 rec["tomb_gap"] = dict(DEFAULTS, **c)["tomb_gap"]
             for q in ("confirm_cap", "refute_cap", "rebut"):
@@ -813,7 +826,10 @@ def _cfg_key(r):
                                                   r.get("kinematic_gate", 0),
                                                   r.get("apsa_rule"),
                                                   r.get("tomb_gap", 20),
-                                                  r.get("liar_vote", False))
+                                                  r.get("liar_vote", False),
+                                                  r.get("liar_win", 200),
+                                                  r.get("liar_gap"),
+                                                  r.get("apsa_window", "arrival"))
 
 
 # ------------------------------------------------------------------- отчёт
@@ -1175,6 +1191,12 @@ def main():
                     help="v2.0: на сколько событий окно должно обновиться до второй фазы карантина")
     ap.add_argument("--liar-vote", action="store_true",
                     help="v2.0: хоронить автора, у которого >= 25 %% из 200 его общих событий опровергнуты кворумом 2")
+    ap.add_argument("--liar-win", type=int, default=50,
+                    help="v2.0: окно лжеца - сколько последних общих событий автора смотреть")
+    ap.add_argument("--liar-gap", type=int, default=2,
+                    help="v2.0: пауза второй фазы для лжеца, в его событиях (по умолчанию tomb-gap // 2)")
+    ap.add_argument("--apsa-window", default="event", choices=("arrival", "event"),
+                    help="v2.1: окно обвинителя по времени прихода ударов (v2.0) или по самим событиям")
     ap.add_argument("--rebut", action="store_true",
                     help="v1.3: отвечать подтверждением на опровержение того, что мой сенсор видит верным")
     ap.add_argument("--no-slot-digest", action="store_true",
@@ -1216,6 +1238,9 @@ def main():
     extra["apsa_rule"] = a.apsa_rule
     extra["tomb_gap"] = a.tomb_gap
     extra["liar_vote"] = a.liar_vote
+    extra["liar_win"] = a.liar_win
+    extra["liar_gap"] = a.liar_gap
+    extra["apsa_window"] = a.apsa_window
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return

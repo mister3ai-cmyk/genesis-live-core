@@ -22,6 +22,16 @@
   "share" - доля A/(A+F) >= 0.25 и A >= 5 (окно v1.3: 0 штрафов честным
             в 1050 прогонах при шуме 0-5 %). Не зависит от размера окна.
 
+Окно обвинителя (win_kind), режим "count":
+  "arrival" (v2.0) - удары, ПРИШЕДШИЕ за время последних win проверенно-верных
+            событий. Дыра: в тишине окно стоит, а PULL досылает пачку старых
+            шумовых опровержений - доля раздувается, честный хоронится
+            (chain 20 %, isolate, шум 5 %, зерно 8: 25 % на 575.6 с).
+  "event"   (v2.1) - сколько ИМЕННО событий из окна последних win проверенно-
+            верных опроверг узел. Опровержение старого события вне окна на
+            долю не влияет; пришедшее раньше события - засчитывается, когда
+            событие дойдёт до проверки.
+
 Режимы окна:
   "count" (по умолчанию) - окно из `win` событий; прогрев: F + A >= warmup
            и с первого наблюдения прошло >= warm_ms;
@@ -49,7 +59,7 @@ def classify_behavior(f_events, a_forced, thresh=0.70, gamma=1.5):
 class APSASanitaryAudit:
     def __init__(self, win=200, mode="count", thresh=0.70, gamma=1.5,
                  warmup=10, warm_ms=5000, dt_ms=2000, rule="tz",
-                 share=0.25, min_a=5):
+                 share=0.25, min_a=5, win_kind="arrival"):
         self.win, self.mode, self.thresh, self.gamma = win, mode, thresh, gamma
         self.rule, self.share, self.min_a = rule, share, min_a
         self.warmup, self.warm_ms, self.dt_ms = warmup, warm_ms, dt_ms
@@ -58,15 +68,37 @@ class APSASanitaryAudit:
         self.acc = {}                    # обвинитель -> deque отметок ударов
         self.aut = {}                    # автор -> deque (отметка, скачок?)
         self.first = {}                  # (источник, узел) -> первое наблюдение
+        self.win_kind = win_kind
+        self.ev_win = deque()            # "event": eid последних win проверенно-верных
+        self.ev_ref = {}                 # eid в окне -> кто его опроверг
+        self.ev_cnt = {}                 # обвинитель -> сколько событий окна опроверг
+        self.ev_pend = {}                # eid ещё не проверен -> кто уже опроверг
 
     # -------------------------------------------------- наблюдения судьи
-    def saw_true(self, now_ms):
+    def saw_true(self, now_ms, eid=None):
         self.true_seq += 1
         if self.mode == "time":
             self.true_times.append(now_ms)
+        if self.win_kind == "event" and eid is not None and eid not in self.ev_ref:
+            refs = self.ev_pend.pop(eid, set())
+            self.ev_win.append(eid)
+            self.ev_ref[eid] = refs
+            for v in refs:
+                self.ev_cnt[v] = self.ev_cnt.get(v, 0) + 1
+            while len(self.ev_win) > self.win:
+                for v in self.ev_ref.pop(self.ev_win.popleft(), ()):
+                    self.ev_cnt[v] -= 1
 
-    def false_refutation(self, v, now_ms):
+    def false_refutation(self, v, now_ms, eid=None):
         self.first.setdefault(("acc", v), now_ms)
+        if self.win_kind == "event" and self.mode == "count":
+            refs = self.ev_ref.get(eid)
+            if refs is None:
+                self.ev_pend.setdefault(eid, set()).add(v)
+            elif v not in refs:
+                refs.add(v)
+                self.ev_cnt[v] = self.ev_cnt.get(v, 0) + 1
+            return
         self.acc.setdefault(v, deque()).append(
             now_ms if self.mode == "time" else self.true_seq)
 
@@ -81,6 +113,9 @@ class APSASanitaryAudit:
     def counts(self, v, now_ms, src="acc"):
         """(A, F) по окну."""
         if src == "acc":
+            if self.win_kind == "event" and self.mode == "count":
+                a = self.ev_cnt.get(v, 0)
+                return a, max(len(self.ev_win) - a, 0)
             q = self.acc.get(v, ())
             if self.mode == "time":
                 lo = now_ms - self.dt_ms

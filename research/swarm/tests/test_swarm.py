@@ -782,3 +782,66 @@ def test_v20_buried_author_rejected_at_input():
     e2 = au.gen_own(1300, "sector_2.status", "hazard", None)
     assert ju.accept(e2.env, 1400) is None and ju.rejects["tombstoned"] == 1
     assert not ju.admitted(e1.eid)
+
+
+def test_v20_thymus_blocks_second_tombstone_in_node_contour():
+    """Негативный тест (n = 5): Тимус встроен в контур узла. Второе надгробие -
+    своим решением APSA или чужим кворумом - отказ, в реестр не попадает, наружу
+    не рассылается. Лимит BFT: (n - 1) // 3 = 1."""
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    ju = mk_node(0, n=5, truth=truth, arbiter="anis")
+    ju.clock = 1000
+    log = lambda m: print("[thymus] " + m)
+
+    # 1. Первое надгробие, двухфазно: SUSPICIOUS, затем TOMBSTONE после окна.
+    ju.bury("acc", 3, 0.40, 20, 100)
+    assert ju.tombs.is_suspect(3) and not ju.tombs.is_dead(3)
+    ju.bury("acc", 3, 0.40, 20, 120)
+    assert ju.tombs.is_dead(3) and 3 in ju.slashed
+    sent = len(ju.tomb_events)
+    log("1-е надгробие узлу 3: принято, AIR = %d/5 = %.2f, разослано %d"
+        % (len(ju.tombs.dead), len(ju.tombs.dead) / 5, sent))
+
+    # 2. Второе надгробие своим решением: обе фазы пройдены - Тимус отказывает.
+    ju.bury("acc", 4, 0.40, 20, 200)
+    ju.bury("acc", 4, 0.40, 20, 220)
+    assert not ju.tombs.is_dead(4) and 4 not in ju.slashed
+    assert ju.tombs.blocked == 1 and len(ju.tomb_events) == sent
+    log("2-е надгробие узлу 4 (своё): ОТКАЗ, AIR был бы 2/5 = 0.40 > 0.20, "
+        "блокировок %d, в реестре %s" % (ju.tombs.blocked, sorted(ju.tombs.dead)))
+
+    # 3. Второе надгробие чужим кворумом (2 живых узла) - тоже отказ.
+    assert not ju.tombs.foreign(1, 2, 300)
+    assert not ju.tombs.foreign(4, 2, 310)          # кворум набран, Тимус - нет
+    assert not ju.tombs.is_dead(2) and ju.tombs.blocked == 2
+    log("2-е надгробие узлу 2 (кворум чужих 1+4): ОТКАЗ, блокировок %d, "
+        "в реестре %s" % (ju.tombs.blocked, sorted(ju.tombs.dead)))
+
+    # 4. Отказ не ломает приём: события непохороненных узлов 2 и 4 принимаются.
+    for a in (2, 4):
+        e = mk_node(a, n=5, truth=truth).gen_own(1500, "sector_1.status", "hazard", None)
+        assert ju.accept(e.env, 1600) is not None and ju.admitted(e.eid)
+    log("события узлов 2 и 4 после отказа принимаются, узел 3 - нет")
+
+
+def test_v21_event_window_ignores_late_burst_of_old_refutations():
+    """Дыра v2.0: в тишине окно судьи стоит, PULL досылает пачку старых шумовых
+    опровержений - по времени прихода доля 30 %, честный хоронится. По событиям
+    окна старые события не считаются."""
+    def judge(kind):
+        a = apsa.APSASanitaryAudit(rule="share", win_kind=kind)
+        for i in range(60):
+            a.saw_true(1000, "old%d" % i)        # проверены давно
+        for i in range(200):
+            a.saw_true(2000, "new%d" % i)        # окно - последние 200
+        for i in range(60):                      # пачка поздних опровержений старого
+            a.false_refutation(7, 575_000, "old%d" % i)
+        return a.verdict(7, 575_000)[0]
+    assert judge("arrival") == apsa.INTENTIONAL
+    assert judge("event") != apsa.INTENTIONAL
+    a = apsa.APSASanitaryAudit(rule="share", win_kind="event")
+    for i in range(200):
+        a.saw_true(1000, "e%d" % i)
+    for i in range(60):                          # клеветник: 30 % событий окна
+        a.false_refutation(4, 2000, "e%d" % i)
+    assert a.verdict(4, 9000)[0] == apsa.INTENTIONAL

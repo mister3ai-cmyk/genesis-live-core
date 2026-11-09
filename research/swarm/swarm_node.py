@@ -493,13 +493,17 @@ class Node:
         # кворумом из 2 узлов, среди последних 200 его общих событий
         self.liar_vote = bool(cfg.get("liar_vote", False))
         self.lie_hist = {}          # автор -> deque eid его последних общих событий
+        self.liar_win = int(cfg.get("liar_win", 50) or 50)     # v2.1: 50 (v2.0: 200)
+        lg = cfg.get("liar_gap", 2)                            # v2.1: 2 (v2.0: tomb_gap // 2)
+        self.liar_gap = int(lg) if lg is not None else None
         self.lie_bad = {}           # автор -> множество eid с R >= 2
         self.tomb_events = []
         if self.anis:
             self.slash = True
             self.apsa = APSASanitaryAudit(
                 mode="time" if lit else "count",
-                rule=cfg.get("apsa_rule") or ("tz" if lit else "share"))
+                rule=cfg.get("apsa_rule") or ("tz" if lit else "share"),
+                win_kind=cfg.get("apsa_window", "event"))     # v2.1: event (v2.0: arrival)
             self.tomb_gap = int(cfg.get("tomb_gap", 20) or 20)
             self.tombs = TombstoneRegistry(cfg["n"], idx, two_phase=not lit,
                                            quorum=1 if lit else 2,
@@ -645,7 +649,7 @@ class Node:
             # опровергнутое значение было правдой. Обвинитель лжёт - доверие
             # к нему 0 навсегда, его прошлые оценки отменяются пересчётом.
             if self.anis:
-                self.apsa.false_refutation(v, self.clock)
+                self.apsa.false_refutation(v, self.clock, target.eid)
                 st, sv, _, _ = self.apsa.verdict(v, self.clock, "acc")
                 if st == INTENTIONAL:
                     self.bury("acc", v, sv, self.tomb_gap, self.apsa.true_seq)
@@ -979,7 +983,7 @@ class Node:
         if self.anis and self.kin_gate and ev.key.endswith(".pos"):
             self.kinematic_check(ev, now_ms)
         if self.anis and self.liar_vote:
-            q = self.lie_hist.setdefault(ev.author, deque(maxlen=200))
+            q = self.lie_hist.setdefault(ev.author, deque(maxlen=self.liar_win))
             q.append(ev.eid)
             self.kin_n[ev.author] = self.kin_n.get(ev.author, 0) + 1
         # Подтверждаем только то, что в карантине (иначе трафик удвоится),
@@ -989,7 +993,7 @@ class Node:
             if ok:
                 self.true_seq += 1
                 if self.anis:
-                    self.apsa.saw_true(now_ms)
+                    self.apsa.saw_true(now_ms, ev.eid)
             if ok and not self.admitted(ev.eid):
                 self.emit_validation(ev, "confirmed", now_ms)
             elif not ok:
@@ -1007,7 +1011,8 @@ class Node:
         bad = self.lie_bad.get(a, set())
         nb = sum(1 for e in q if e in bad)
         if nb >= 5 and nb >= 0.25 * len(q):
-            self.bury("lie", a, nb / len(q), self.tomb_gap // 2, self.kin_n.get(a, 0))
+            gap = self.liar_gap if self.liar_gap is not None else self.tomb_gap // 2
+            self.bury("lie", a, nb / len(q), gap, self.kin_n.get(a, 0))
 
     def kinematic_check(self, ev, now_ms):
         """T4: скачок координаты цели против прежнего победителя слота."""
