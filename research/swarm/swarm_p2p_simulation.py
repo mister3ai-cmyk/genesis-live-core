@@ -53,7 +53,8 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 rebut=False, admit_rule="trust", liar_k=0,
                 vote_order="arrival", sensor_filter=True,   # v1.4
                 self_trust="full", pull_priority="log", pull_quiet_cap=0,
-                self_admit="always")
+                self_admit="always", arbiter="scalar", kinematic_gate=0,   # v2.0
+                apsa_rule=None, tomb_gap=20, liar_vote=False)
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -165,7 +166,10 @@ def run_once(cfg):
                 admit_rule=cfg["admit_rule"], liar_k=cfg["liar_k"],
                 vote_order=cfg["vote_order"], sensor_filter=cfg["sensor_filter"],
                 self_trust=cfg["self_trust"], pull_priority=cfg["pull_priority"],
-                pull_quiet_cap=cfg["pull_quiet_cap"], self_admit=cfg["self_admit"])
+                pull_quiet_cap=cfg["pull_quiet_cap"], self_admit=cfg["self_admit"],
+                arbiter=cfg["arbiter"], kinematic_gate=cfg["kinematic_gate"],
+                apsa_rule=cfg["apsa_rule"], tomb_gap=cfg["tomb_gap"],
+                liar_vote=cfg["liar_vote"])
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -234,6 +238,16 @@ def run_once(cfg):
         rec["pull_quiet_cap"] = cfg["pull_quiet_cap"]
     if cfg["self_admit"] != "always":
         rec["self_admit"] = cfg["self_admit"]
+    if cfg["arbiter"] != "scalar":
+        rec["arbiter"] = cfg["arbiter"]
+    if cfg["kinematic_gate"]:
+        rec["kinematic_gate"] = cfg["kinematic_gate"]
+    if cfg["apsa_rule"]:
+        rec["apsa_rule"] = cfg["apsa_rule"]
+    if cfg["liar_vote"]:
+        rec["liar_vote"] = True
+    if cfg["arbiter"] != "scalar":
+        rec["tomb_gap"] = cfg["tomb_gap"]
     rec["metrics"] = m
     return rec, results
 
@@ -339,6 +353,12 @@ def compute_metrics(cfg, world, results):
     tot = len(kset) * len(honest)
     m["ref_match_frac"] = _r(ok / tot)
     m["ref_diff"] = {k: _r(v / tot) for k, v in causes.items()}
+    # v2.0: эталон только по слотам, где эталонное событие писал честный узел
+    # (правдивые события атакующего после надгробия намеренно не принимаются)
+    hk = [k for k in kset if ref.get(keys[k]) in labels
+          and labels[ref[keys[k]]][4] in honest]
+    okh = sum(1 for i in honest for k in hk if final[i][k] == ref.get(keys[k], ""))
+    m["ref_match_honest_frac"] = _r(okh / max(len(hk) * len(honest), 1))
     m["div_per_s"] = [round(x, 3) for x in div]
     _, win = net.parse_partition(PARTITIONS.get(cfg["partition"], cfg["partition"]))
     if win:
@@ -455,6 +475,7 @@ def compute_metrics(cfg, world, results):
     m["slashed_honest"] = sum(1 for (_, v, _) in sl if v in honest)
     m["slashed_attacker_by"] = sum(1 for (_, v, _) in sl if v not in honest)
     m["sensor_flips"] = sum(results[i].get("sensor_flips", 0) for i in honest)
+    m["thymus_blocked"] = sum(results[i].get("thymus_blocked", 0) for i in honest)
     # v1.4 шаг 0: совпадают ли множества голосов и решения о приёме у честных
     vs = [results[i].get("vstate") for i in honest]
     if all(v is not None for v in vs):
@@ -736,6 +757,16 @@ def run_grid(cfgs, out, workers, extra):
                 rec["pull_quiet_cap"] = dict(DEFAULTS, **c)["pull_quiet_cap"]
             if dict(DEFAULTS, **c)["self_admit"] != "always":
                 rec["self_admit"] = dict(DEFAULTS, **c)["self_admit"]
+            if dict(DEFAULTS, **c)["arbiter"] != "scalar":
+                rec["arbiter"] = dict(DEFAULTS, **c)["arbiter"]
+            if dict(DEFAULTS, **c)["kinematic_gate"]:
+                rec["kinematic_gate"] = dict(DEFAULTS, **c)["kinematic_gate"]
+            if dict(DEFAULTS, **c)["apsa_rule"]:
+                rec["apsa_rule"] = dict(DEFAULTS, **c)["apsa_rule"]
+            if dict(DEFAULTS, **c)["liar_vote"]:
+                rec["liar_vote"] = True
+            if dict(DEFAULTS, **c)["arbiter"] != "scalar":
+                rec["tomb_gap"] = dict(DEFAULTS, **c)["tomb_gap"]
             for q in ("confirm_cap", "refute_cap", "rebut"):
                 if dict(DEFAULTS, **c)[q]:
                     rec[q] = dict(DEFAULTS, **c)[q]
@@ -777,7 +808,12 @@ def _cfg_key(r):
                                                   r.get("self_trust", "full"),
                                                   r.get("pull_priority", "log"),
                                                   r.get("pull_quiet_cap", 0),
-                                                  r.get("self_admit", "always"))
+                                                  r.get("self_admit", "always"),
+                                                  r.get("arbiter", "scalar"),
+                                                  r.get("kinematic_gate", 0),
+                                                  r.get("apsa_rule"),
+                                                  r.get("tomb_gap", 20),
+                                                  r.get("liar_vote", False))
 
 
 # ------------------------------------------------------------------- отчёт
@@ -1127,6 +1163,18 @@ def main():
                     help="v1.4: записей в ответе PULL, когда своих событий уже нет (0 = как всегда, 24)")
     ap.add_argument("--self-admit", default="always", choices=("always", "rule"),
                     help="v1.4: своё событие по общему ключу - принимать всегда или по общему правилу")
+    ap.add_argument("--arbiter", default="scalar", choices=("scalar", "anis", "anis-literal"),
+                    help="v2.0: scalar - доверие W (v1.4); anis - APSA + надгробия с поправками; "
+                         "anis-literal - буквально по ТЗ ANIS v2.0")
+    ap.add_argument("--kinematic-gate", type=int, default=0,
+                    help="v2.0: скачок координаты цели больше N за одно изменение - аномалия автора (0 = выкл)")
+    ap.add_argument("--apsa-rule", default=None, choices=("share", "tz"),
+                    help="v2.0: правило INTENTIONAL - доля >= 25 %% (share, по умолчанию для anis) "
+                         "или S >= 0.70 по ТЗ (tz, по умолчанию для anis-literal)")
+    ap.add_argument("--tomb-gap", type=int, default=20,
+                    help="v2.0: на сколько событий окно должно обновиться до второй фазы карантина")
+    ap.add_argument("--liar-vote", action="store_true",
+                    help="v2.0: хоронить автора, у которого >= 25 %% из 200 его общих событий опровергнуты кворумом 2")
     ap.add_argument("--rebut", action="store_true",
                     help="v1.3: отвечать подтверждением на опровержение того, что мой сенсор видит верным")
     ap.add_argument("--no-slot-digest", action="store_true",
@@ -1163,6 +1211,11 @@ def main():
     extra["pull_priority"] = a.pull_priority
     extra["pull_quiet_cap"] = a.pull_quiet_cap
     extra["self_admit"] = a.self_admit
+    extra["arbiter"] = a.arbiter
+    extra["kinematic_gate"] = a.kinematic_gate
+    extra["apsa_rule"] = a.apsa_rule
+    extra["tomb_gap"] = a.tomb_gap
+    extra["liar_vote"] = a.liar_vote
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return

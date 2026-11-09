@@ -714,3 +714,71 @@ def test_v14_sensor_filter_off_counts_refutation_my_sensor_disputes():
             ju.accept(v, 1600)
         assert ju.admitted(e.eid) is want           # off: кворум опровержений действует
         assert not ju.slashed
+
+
+# v2.0-anis ----------------------------------------------------------------
+
+import apsa_engine as apsa                                  # noqa: E402
+import tombstone_registry as tomb                           # noqa: E402
+
+
+def test_v20_tz_formula_buries_one_error_without_warmup_but_share_rule_does_not():
+    """Канон ТЗ: A = 1, F = 0 -> S = 1.5 >= 0.70 -> INTENTIONAL (дыра формулы).
+    Правило доли с прогревом не хоронит ни одну ошибку и ни 5 % шума."""
+    assert apsa.classify_behavior(0, 1) == apsa.INTENTIONAL
+    a = apsa.APSASanitaryAudit(rule="share")
+    for _ in range(200):
+        a.saw_true(1000)
+    for _ in range(10):                          # 5 % окна - шум честного
+        a.false_refutation(1, 1000)
+    assert a.verdict(1, 9000)[0] != apsa.INTENTIONAL
+    for _ in range(50):                          # 30 % окна - клеветник
+        a.false_refutation(2, 1000)
+    assert a.verdict(2, 9000)[0] == apsa.INTENTIONAL
+
+
+def test_v20_tz_formula_threshold_falls_with_window_size():
+    """При S = 1.5*A^2/(W-A) >= 0.7 доля, при которой хоронят, падает с окном."""
+    def first_a(w):
+        return next(a for a in range(1, w) if apsa.s_index(a, w - a) >= 0.70)
+    assert first_a(200) / 200 > first_a(500) / 500 > first_a(2000) / 2000
+
+
+def test_v20_two_phase_quarantine_then_tombstone():
+    r = tomb.TombstoneRegistry(5, 0, two_phase=True)
+    assert not r.intentional("acc", 3, pos=100, gap=20, now_ms=1)
+    assert r.is_suspect(3) and not r.is_dead(3)
+    assert not r.intentional("acc", 3, pos=110, gap=20, now_ms=2)   # окно почти то же
+    assert r.intentional("acc", 3, pos=120, gap=20, now_ms=3) and r.is_dead(3)
+
+
+def test_v20_foreign_tombstone_needs_quorum_of_two_live_issuers():
+    r = tomb.TombstoneRegistry(5, 0, quorum=2)
+    assert not r.foreign(1, 2, 10) and not r.is_dead(2)              # одиночное - подстава
+    assert r.foreign(4, 2, 20) and r.is_dead(2)
+    r2 = tomb.TombstoneRegistry(5, 0, quorum=2, thymus="literal", air=1.0)
+    r2.dead[4] = 0                                                   # похороненный не голосует
+    r2.foreign(4, 2, 10)
+    assert not r2.foreign(1, 2, 20) and not r2.is_dead(2)
+
+
+def test_v20_thymus_bft_allows_one_of_five_literal_allows_first_only():
+    r = tomb.TombstoneRegistry(5, 0, two_phase=False, thymus="bft")
+    assert r.intentional("acc", 1, 0, 0, 1)
+    assert not r.intentional("acc", 2, 0, 0, 2) and r.blocked == 1
+    lit = tomb.TombstoneRegistry(5, 0, two_phase=False, thymus="literal", air=0.01)
+    assert lit.intentional("acc", 1, 0, 0, 1)        # AIR до добавления 0/5 <= 0.01
+    assert not lit.intentional("acc", 4, 0, 0, 2)    # дальше никого, даже клеветника
+
+
+def test_v20_buried_author_rejected_at_input():
+    truth = sim.build_world(1, 3, 20_000)["truth"]
+    au = mk_node(0, truth=truth)
+    ju = mk_node(2, truth=truth, arbiter="anis")
+    e1 = au.gen_own(1000, "sector_1.status", "hazard", None)
+    assert ju.accept(e1.env, 1100) is not None
+    ju.tombs.dead[0] = 1200
+    ju.on_buried(0)
+    e2 = au.gen_own(1300, "sector_2.status", "hazard", None)
+    assert ju.accept(e2.env, 1400) is None and ju.rejects["tombstoned"] == 1
+    assert not ju.admitted(e1.eid)

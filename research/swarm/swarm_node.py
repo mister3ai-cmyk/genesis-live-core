@@ -42,6 +42,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 import swarm_net as net
 import swarm_wire as wire
+from apsa_engine import APSASanitaryAudit, INTENTIONAL
+from tombstone_registry import TombstoneRegistry
 
 GEP = "0.1"
 STATUSES = ("clear", "obstacle", "hazard", "unknown")
@@ -480,6 +482,28 @@ class Node:
         self.batch_ms = int(cfg.get("batch_ms", 0) or 0)
         self.bq = max(1, self.batch_ms // self.tick_ms) if self.batch_ms else 0
         self.slash = bool(cfg.get("slash", False))
+        # v2.0-anis: дискретный арбитраж вместо порога доверия
+        #   "scalar" - как v1.4; "anis" - с поправками; "anis-literal" - буквально по ТЗ
+        self.arbiter = cfg.get("arbiter", "scalar")
+        self.anis = self.arbiter != "scalar"
+        lit = self.arbiter == "anis-literal"
+        self.kin_gate = int(cfg.get("kinematic_gate", 0) or 0)
+        self.kin_n = {}             # автор -> сколько его координат я проверил
+        # v2.0: признак лжеца по голосам - его общие события, опровергнутые
+        # кворумом из 2 узлов, среди последних 200 его общих событий
+        self.liar_vote = bool(cfg.get("liar_vote", False))
+        self.lie_hist = {}          # автор -> deque eid его последних общих событий
+        self.lie_bad = {}           # автор -> множество eid с R >= 2
+        self.tomb_events = []
+        if self.anis:
+            self.slash = True
+            self.apsa = APSASanitaryAudit(
+                mode="time" if lit else "count",
+                rule=cfg.get("apsa_rule") or ("tz" if lit else "share"))
+            self.tomb_gap = int(cfg.get("tomb_gap", 20) or 20)
+            self.tombs = TombstoneRegistry(cfg["n"], idx, two_phase=not lit,
+                                           quorum=1 if lit else 2,
+                                           thymus="literal" if lit else "bft")
         self.slash_k = int(cfg.get("slash_window", 1) or 1)   # 1 = v1.2
         self.true_seq = 0           # сколько общих событий мой сенсор признал верными
         self.strikes = {}           # обвинитель -> deque(true_seq в момент удара)
@@ -511,6 +535,8 @@ class Node:
         # P4: "rule" - по общим ключам своё событие судится по тому же правилу,
         # что и чужое (иначе при шуме автор держит то, что остальные отвергли)
         self.self_admit = cfg.get("self_admit", "always")
+        if cfg.get("arbiter", "scalar") != "scalar":
+            self.self_admit = "rule"    # anis: своё событие - по общему правилу
         self.pull_priority = cfg.get("pull_priority", "log")
         self.pull_quiet_cap = int(cfg.get("pull_quiet_cap", 0) or 0)
         # история автора как множество: его события, опровергнутые >= 2 узлами;
@@ -553,6 +579,15 @@ class Node:
         if self.vdirty and self.vflush_clock != self.clock:
             self.vflush_clock = self.clock      # не чаще раза на момент времени
             self.flush_votes()
+        if self.anis:
+            if a in self.slashed:
+                return False
+            cs, rs = self.vset.get(eid, ((), ()))
+            sl = self.slashed
+            sus = self.tombs.is_suspect
+            c = sum(1 for x in cs if x not in sl and not sus(x))
+            r = sum(1 for x in rs if x not in sl and not sus(x))
+            return r < 2 or c >= r
         rule = self.admit_rule
         if rule != "trust":
             cs, rs = self.vset.get(eid, ((), ()))
@@ -593,6 +628,10 @@ class Node:
             return
         cs, rs = self.vset.setdefault(target.eid, (set(), set()))
         (cs if verdict == "confirmed" else rs).add(v)
+        if (self.anis and self.liar_vote and verdict == "refuted" and len(rs) == 2
+                and subj != self.me and not self.is_attacker):
+            self.lie_bad.setdefault(subj, set()).add(target.eid)
+            self.liar_check(subj)
         if verdict == "refuted" and len(rs) >= 2:
             self.refuted_q.setdefault(subj, set()).add(target.eid)
         if self.slash and v in self.slashed:
@@ -605,7 +644,16 @@ class Node:
             # Accuser slashing (v1.1): мой собственный сенсор видит, что
             # опровергнутое значение было правдой. Обвинитель лжёт - доверие
             # к нему 0 навсегда, его прошлые оценки отменяются пересчётом.
-            if self.slash_k <= 1 or self.strike(v):
+            if self.anis:
+                self.apsa.false_refutation(v, self.clock)
+                st, sv, _, _ = self.apsa.verdict(v, self.clock, "acc")
+                if st == INTENTIONAL:
+                    self.bury("acc", v, sv, self.tomb_gap, self.apsa.true_seq)
+                if (self.rebut and subj != self.me
+                        and (self.me, target.eid) not in self.vseen):
+                    self.rebuttals += 1
+                    self.emit_validation(target, "confirmed", self.clock)
+            elif self.slash_k <= 1 or self.strike(v):
                 self.slashed[v] = self.clock
                 self.recompute_trust()
             elif (self.rebut and subj != self.me
@@ -614,7 +662,7 @@ class Node:
                 # ушло в карантин - отвечаю подтверждением, один раз
                 self.rebuttals += 1
                 self.emit_validation(target, "confirmed", self.clock)
-            if self.sensor_filter or v in self.slashed:
+            if (self.sensor_filter and not self.anis) or v in self.slashed:
                 return  # v1.3: ниже порога опровержение просто не учитывается
         ev_in = (body.get("evidence") or {}).get("applied_in")
         bonus = self.EVIDENCE if ev_in else 1.0
@@ -777,8 +825,14 @@ class Node:
             return None
         a = self.idx_of[env["author"]]
         body, kind = env["body"], env["kind"]
+        if self.anis and self.tombs.is_dead(a):
+            self.reject("tombstoned", a,
+                        body.get("seq") if isinstance(body, dict) else None, now_ms)
+            return None
         if kind == "key_event":
             return self.accept_key_event(env, a, now_ms)
+        if kind == "tombstone":
+            return self.accept_tombstone(env, a, now_ms)
         if kind not in ("glyph", "validation") or not isinstance(body, dict):
             self.reject("schema")
             return None
@@ -854,6 +908,40 @@ class Node:
             self.fresh["svc"].append(ev)
         return ev
 
+    def accept_tombstone(self, env, a, now_ms):
+        body = env["body"]
+        tgt = body.get("target") if isinstance(body, dict) else None
+        if (not self.anis or not isinstance(tgt, int) or not 0 <= tgt < self.n
+                or body.get("node") != a):
+            self.reject("tombstone_schema")
+            return None
+        ev = Ev(env["id"], "tombstone", a, body, now_ms, env)
+        self.events[ev.eid] = ev
+        self.tomb_events.append(ev)
+        self.fresh["all"].append(ev)            # ретрансляция, как key_event
+        if self.tombs.foreign(a, tgt, now_ms):
+            self.on_buried(tgt)
+        return ev
+
+    def bury(self, src, v, s_val, gap, pos):
+        """Моё APSA сказало INTENTIONAL: двухфазно (или сразу) - надгробие."""
+        if self.tombs.intentional(src, v, pos, gap, self.clock):
+            self.on_buried(v)
+            body = {"target": v, "s": int(round(s_val * 1000)), "src": src,
+                    "hlc": self.hlc.now(self.clock), "node": self.me}
+            env = make_env(self.k, "tombstone", body)
+            ev = Ev(env["id"], "tombstone", self.me, body, self.clock, env)
+            self.events[ev.eid] = ev
+            self.tomb_events.append(ev)
+            self.fresh["all"].append(ev)
+
+    def on_buried(self, v):
+        """Надгробие в силе: голоса похороненного не учитываются, его события
+        не принимаются (как штраф v1.1), новые пакеты от него - отказ на входе."""
+        if v not in self.slashed:
+            self.slashed[v] = self.clock
+            self.recompute_trust()
+
     def accept_key_event(self, env, a, now_ms):
         body = env["body"]
         try:
@@ -888,12 +976,20 @@ class Node:
             if "T3" in self.attacks:
                 self.replay_pool.append(ev)
             return
+        if self.anis and self.kin_gate and ev.key.endswith(".pos"):
+            self.kinematic_check(ev, now_ms)
+        if self.anis and self.liar_vote:
+            q = self.lie_hist.setdefault(ev.author, deque(maxlen=200))
+            q.append(ev.eid)
+            self.kin_n[ev.author] = self.kin_n.get(ev.author, 0) + 1
         # Подтверждаем только то, что в карантине (иначе трафик удвоится),
         # опровергаем всегда: ложь, уже вошедшую в картину, надо выбить.
         if self.sensor.covers(ev.key, now_ms):
             ok = self.sensor.check(ev.key, ev.value, ev.hlc[0], now_ms)
             if ok:
                 self.true_seq += 1
+                if self.anis:
+                    self.apsa.saw_true(now_ms)
             if ok and not self.admitted(ev.eid):
                 self.emit_validation(ev, "confirmed", now_ms)
             elif not ok:
@@ -902,6 +998,37 @@ class Node:
             self.fp_records.append((ev.eid[7:23], ev.author, now_ms, 0))
         else:
             self.fp_pending[ev.eid] = now_ms
+
+    def liar_check(self, a):
+        """Доля событий автора, опровергнутых кворумом, в окне его 200 общих."""
+        q = self.lie_hist.get(a)
+        if not q or len(q) < 10:
+            return
+        bad = self.lie_bad.get(a, set())
+        nb = sum(1 for e in q if e in bad)
+        if nb >= 5 and nb >= 0.25 * len(q):
+            self.bury("lie", a, nb / len(q), self.tomb_gap // 2, self.kin_n.get(a, 0))
+
+    def kinematic_check(self, ev, now_ms):
+        """T4: скачок координаты цели против прежнего победителя слота."""
+        prev = None
+        for _, eid, value in reversed(self.table.slots.get(ev.key, ())):
+            if eid != ev.eid and self.admitted(eid):
+                prev = value
+                break
+        if prev is None:
+            return
+        try:
+            jump = max(abs(ev.value[0] - prev[0]),
+                       abs(ev.value[1] - prev[1])) > self.kin_gate
+        except (TypeError, IndexError):
+            return
+        a = ev.author
+        self.kin_n[a] = self.kin_n.get(a, 0) + 1
+        self.apsa.kinematic(a, jump, now_ms)
+        st, sv, _, _ = self.apsa.verdict(a, now_ms, "aut")
+        if st == INTENTIONAL:
+            self.bury("aut", a, sv, 10, self.kin_n[a])
 
     def emit_validation(self, ev, verdict, now_ms, label=None):
         body = {"glyph_hash": ev.eid, "verdict": verdict,
@@ -1160,7 +1287,7 @@ class Node:
             if e.eid in seen:
                 continue
             seen.add(e.eid)
-            if e.kind == "key_event":
+            if e.kind in ("key_event", "tombstone"):
                 out.append((wire.enc_json(canon(e.env)), 1))
             elif e.bref is not None:
                 groups.setdefault(e.bref[0], []).append(e.bref[1])
@@ -1298,7 +1425,7 @@ class Node:
         return self.answer_body(env["body"])
 
     def answer_body(self, body):
-        out = []
+        out = list(self.tomb_events)
         for ke in self.key_events:
             if self.idx_of[ke.env["body"]["key"]] not in body.get("rev", []):
                 out.append(ke)
@@ -1624,6 +1751,9 @@ def run_node(cfg, idx, barrier, counts, q):
         "applied": node.applied,
         "rebuttals": node.rebuttals,
         "replays": node.replays,
+        "thymus_blocked": node.tombs.blocked if node.anis else 0,
+        "tombs": [[e.author, e.env["body"]["target"], e.env["body"].get("src"), e.env["body"].get("s"), e.arrival]
+                  for e in node.tomb_events if e.author == idx],
         # v1.4: журнал к концу прогона - сколько записей каждого автора у меня есть
         # и последний свой seq (для подсчёта недоставленного)
         "held_n": [len(h) for h in node.held], "own_seq": node.seq,
