@@ -562,3 +562,223 @@ def test_v12_kseq_wire_roundtrip_glyph_and_validation():
     for e in evs:
         assert sn.canon(b.events[e.eid].env) == sn.canon(e.env)
     assert not b.rejects
+
+
+# v1.3 ---------------------------------------------------------------------
+
+def test_v13_sensor_noise_is_deterministic_and_close_to_its_rate():
+    truth = sim.build_world(1, 3, 60_000)["truth"]
+    keys = sorted(k for k in truth if k.endswith(".status"))
+    clean = sn.Sensor(truth, 1, 0)
+    a, b = sn.Sensor(truth, 1, 0, noise=0.05), sn.Sensor(truth, 1, 0, noise=0.05)
+    probes = [(k, sn.truth_at(truth, k, t), t) for k in keys for t in range(1000, 60_000, 500)]
+    ra = [a.check(k, v, t, t + 100) for k, v, t in probes]
+    assert ra == [b.check(k, v, t, t + 100) for k, v, t in probes]   # одно измерение на событие
+    wrong = sum(x != clean.check(k, v, t, t + 100) for x, (k, v, t) in zip(ra, probes))
+    assert 0.02 < wrong / len(probes) < 0.08 and wrong == a.flips
+
+
+def _judge(k=3):
+    truth = sim.build_world(1, 3, 20_000)["truth"]
+    ju = mk_node(2, trust=0.5, truth=truth, slash=True, slash_window=k)
+    return ju
+
+
+def test_v13_window_ignores_sporadic_false_refutations():
+    """Честный с шумом: 3 ложных опровержения на 200 проверенно-верных - не штраф;
+    клеветник, опровергающий четверть и больше, - штраф. Окно 1 = v1.2."""
+    ju = _judge(k=3)
+    ju.true_seq = 1000
+    assert not any(ju.strike(0) for _ in range(3))
+    hits = []
+    for i in range(60):
+        ju.true_seq += 1
+        hits.append(ju.strike(1))
+    assert hits.index(True) == int(sn.Node.SLASH_SHARE * sn.Node.SLASH_WIN) - 1
+    ju.true_seq += 10_000                       # старые удары вышли из окна
+    assert not ju.strike(1)
+
+
+def test_v13_slash_window_1_is_instant_and_k3_waits():
+    for k, want in ((1, True), (3, False)):
+        truth, au, ac, ju = _slash_trio(lambda key, now: True)
+        ju.slash_k = k
+        e = au.gen_own(1000, "sector_1.status",
+                       sn.truth_at(truth, "sector_1.status", 1000), None)
+        ju.accept(e.env, 1100)
+        ac.accept(e.env, 1100)
+        before = ju.trust[0]
+        ac.emit_validation(e, "refuted", 1200)
+        ju.accept(ac.fresh["svc"][-1].env, 1300)
+        assert (1 in ju.slashed) is want
+        assert ju.trust[0] == before            # ложное опровержение не учтено
+
+
+def test_v13_refutation_needs_quorum_of_two():
+    truth = sim.build_world(1, 4, 20_000)["truth"]
+    au, r1, r2, ju = (mk_node(i, n=4, trust=1.0, truth=truth, refute_quorum=2)
+                      for i in range(4))
+    ju.sensor.covers = lambda k, now: False
+    e = au.gen_own(1000, "sector_1.status", "hazard", None)
+    for node in (ju, r1, r2):
+        node.accept(e.env, 1100)
+    r1.emit_validation(e, "refuted", 1200)
+    ju.accept(r1.fresh["svc"][-1].env, 1300)
+    assert ju.trust[0] == 1.0 and ju.admitted(e.eid)      # один голос - шум
+    r2.emit_validation(e, "refuted", 1400)
+    ju.accept(r2.fresh["svc"][-1].env, 1500)
+    assert ju.trust[0] < 1.0 and not ju.admitted(e.eid)   # второй - действует
+
+
+def test_v13_log_odds_admission_does_not_depend_on_vote_order():
+    """Правило Линзы: решение - функция от множеств, порядок голосов не важен."""
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    au, v1, v2, v3 = (mk_node(i, n=5, trust=0.5, truth=truth) for i in range(4))
+    e = au.gen_own(1000, "sector_1.status", "hazard", None)
+    votes = []
+    for node, verdict, t in ((v1, "refuted", 1200), (v2, "confirmed", 1300),
+                             (v3, "refuted", 1400)):
+        node.accept(e.env, 1100)
+        node.emit_validation(e, verdict, t)
+        votes.append(node.fresh["svc"][-1].env)
+    seen = set()
+    for order in ((0, 1, 2), (2, 1, 0), (1, 0, 2)):
+        ju = mk_node(4, n=5, trust=0.5, truth=truth, admit_rule="log-odds")
+        ju.sensor.covers = lambda k, now: False
+        ju.accept(e.env, 1500)
+        for i in order:
+            ju.accept(votes[i], 1600)
+        seen.add(ju.admitted(e.eid))
+    assert seen == {False}                     # 1 подтверждение < 2 опровержений
+
+
+def test_v13_liar_needs_a_share_not_a_count():
+    """Автор с 3 событиями, опровергнутыми кворумом: из 1000 общих - шум, его новое
+    событие принимается; из 20 - лжец, без подтверждения не принимается."""
+    truth = sim.build_world(1, 3, 20_000)["truth"]
+    au = mk_node(0, truth=truth)
+    for shared_n, want in ((1000, True), (20, False)):
+        ju = mk_node(2, truth=truth, admit_rule="log-odds", liar_k=3)
+        ju.sensor.covers = lambda k, now: False
+        e = au.gen_own(1000 + shared_n, "sector_1.status", "hazard", None)
+        ju.accept(e.env, 2000)
+        ju.refuted_q[0] = {"a", "b", "c"}
+        ju.shared_n[0] = shared_n
+        assert ju.admitted(e.eid) is want
+
+
+# v1.4 ---------------------------------------------------------------------
+
+def _votes_on(e, truth, plan):
+    """plan: [(idx, verdict, t)] -> подписанные оценки разных узлов."""
+    out = []
+    for idx, verdict, t in plan:
+        node = mk_node(idx, n=5, trust=0.5, truth=truth)
+        node.accept(e.env, t - 50)
+        node.emit_validation(e, verdict, t)
+        out.append(node.fresh["svc"][-1].env)
+    return out
+
+
+def test_v14_canonical_vote_order_gives_one_answer_for_one_set():
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    au = mk_node(0, n=5, trust=0.5, truth=truth)
+    e = au.gen_own(1000, "sector_1.status", "hazard", None)
+    votes = _votes_on(e, truth, [(1, "refuted", 1200), (2, "confirmed", 1300),
+                                 (3, "refuted", 1400)])
+    got = set()
+    for order in ((0, 1, 2), (2, 0, 1), (1, 2, 0)):
+        ju = mk_node(4, n=5, trust=0.5, truth=truth, vote_order="canonical",
+                     refute_quorum=2)
+        ju.sensor.covers = lambda k, now: False
+        ju.accept(e.env, 1500)
+        for i in order:
+            ju.accept(votes[i], 1600)
+        ju.flush_votes()
+        got.add((tuple(ju.trust), round(ju.vsum.get(e.eid, 0.0), 9), ju.admitted(e.eid)))
+    assert len(got) == 1
+
+
+def test_v14_sensor_filter_off_counts_refutation_my_sensor_disputes():
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    au = mk_node(0, n=5, trust=1.0, truth=truth)
+    e = au.gen_own(1000, "sector_1.status",
+                   sn.truth_at(truth, "sector_1.status", 1000), None)
+    votes = _votes_on(e, truth, [(1, "refuted", 1200), (2, "refuted", 1300)])
+    for flt, want in ((True, True), (False, False)):
+        ju = mk_node(4, n=5, trust=1.0, truth=truth, slash=True, slash_window=3,
+                     refute_quorum=2, sensor_filter=flt)
+        ju.sensor.covers = lambda k, now: True      # мой датчик: значение верное
+        ju.accept(e.env, 1500)
+        for v in votes:
+            ju.accept(v, 1600)
+        assert ju.admitted(e.eid) is want           # off: кворум опровержений действует
+        assert not ju.slashed
+
+
+# v2.0-anis ----------------------------------------------------------------
+
+import apsa_engine as apsa                                  # noqa: E402
+import tombstone_registry as tomb                           # noqa: E402
+
+
+def test_v20_tz_formula_buries_one_error_without_warmup_but_share_rule_does_not():
+    """Канон ТЗ: A = 1, F = 0 -> S = 1.5 >= 0.70 -> INTENTIONAL (дыра формулы).
+    Правило доли с прогревом не хоронит ни одну ошибку и ни 5 % шума."""
+    assert apsa.classify_behavior(0, 1) == apsa.INTENTIONAL
+    a = apsa.APSASanitaryAudit(rule="share")
+    for _ in range(200):
+        a.saw_true(1000)
+    for _ in range(10):                          # 5 % окна - шум честного
+        a.false_refutation(1, 1000)
+    assert a.verdict(1, 9000)[0] != apsa.INTENTIONAL
+    for _ in range(50):                          # 30 % окна - клеветник
+        a.false_refutation(2, 1000)
+    assert a.verdict(2, 9000)[0] == apsa.INTENTIONAL
+
+
+def test_v20_tz_formula_threshold_falls_with_window_size():
+    """При S = 1.5*A^2/(W-A) >= 0.7 доля, при которой хоронят, падает с окном."""
+    def first_a(w):
+        return next(a for a in range(1, w) if apsa.s_index(a, w - a) >= 0.70)
+    assert first_a(200) / 200 > first_a(500) / 500 > first_a(2000) / 2000
+
+
+def test_v20_two_phase_quarantine_then_tombstone():
+    r = tomb.TombstoneRegistry(5, 0, two_phase=True)
+    assert not r.intentional("acc", 3, pos=100, gap=20, now_ms=1)
+    assert r.is_suspect(3) and not r.is_dead(3)
+    assert not r.intentional("acc", 3, pos=110, gap=20, now_ms=2)   # окно почти то же
+    assert r.intentional("acc", 3, pos=120, gap=20, now_ms=3) and r.is_dead(3)
+
+
+def test_v20_foreign_tombstone_needs_quorum_of_two_live_issuers():
+    r = tomb.TombstoneRegistry(5, 0, quorum=2)
+    assert not r.foreign(1, 2, 10) and not r.is_dead(2)              # одиночное - подстава
+    assert r.foreign(4, 2, 20) and r.is_dead(2)
+    r2 = tomb.TombstoneRegistry(5, 0, quorum=2, thymus="literal", air=1.0)
+    r2.dead[4] = 0                                                   # похороненный не голосует
+    r2.foreign(4, 2, 10)
+    assert not r2.foreign(1, 2, 20) and not r2.is_dead(2)
+
+
+def test_v20_thymus_bft_allows_one_of_five_literal_allows_first_only():
+    r = tomb.TombstoneRegistry(5, 0, two_phase=False, thymus="bft")
+    assert r.intentional("acc", 1, 0, 0, 1)
+    assert not r.intentional("acc", 2, 0, 0, 2) and r.blocked == 1
+    lit = tomb.TombstoneRegistry(5, 0, two_phase=False, thymus="literal", air=0.01)
+    assert lit.intentional("acc", 1, 0, 0, 1)        # AIR до добавления 0/5 <= 0.01
+    assert not lit.intentional("acc", 4, 0, 0, 2)    # дальше никого, даже клеветника
+
+
+def test_v20_buried_author_rejected_at_input():
+    truth = sim.build_world(1, 3, 20_000)["truth"]
+    au = mk_node(0, truth=truth)
+    ju = mk_node(2, truth=truth, arbiter="anis")
+    e1 = au.gen_own(1000, "sector_1.status", "hazard", None)
+    assert ju.accept(e1.env, 1100) is not None
+    ju.tombs.dead[0] = 1200
+    ju.on_buried(0)
+    e2 = au.gen_own(1300, "sector_2.status", "hazard", None)
+    assert ju.accept(e2.env, 1400) is None and ju.rejects["tombstoned"] == 1
+    assert not ju.admitted(e1.eid)

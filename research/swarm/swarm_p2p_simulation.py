@@ -44,7 +44,17 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 duration_s=600, events_until_s=480, tick_ms=TICK_MS, K=10,
                 revoke_at_ms=240_000, base_port=21000, slot_digest=True,
                 batch_ms=500, slash=True,          # v1.1; v1.0 = batch_ms 0, slash False
-                rate_mode="kseq")      # v1.2 kseq; v1.2 = "seq", v1.1 = "hlc"
+                rate_mode="kseq",      # v1.2 kseq; v1.2 = "seq", v1.1 = "hlc"
+                sensor_noise=0.0,      # v1.3: доля неверных измерений датчика
+                slash_window=3,        # v1.3: порог оконного штрафа; 1 = v1.2
+                refute_quorum=2,       # v1.3: опровержение действует от N узлов
+                confirm_quorum=1,      # v1.3: подтверждение действует от N узлов
+                quorum_scope="all", confirm_cap=None, refute_cap=None,
+                rebut=False, admit_rule="trust", liar_k=0,
+                vote_order="arrival", sensor_filter=True,   # v1.4
+                self_trust="full", pull_priority="log", pull_quiet_cap=0,
+                self_admit="always", arbiter="scalar", kinematic_gate=0,   # v2.0
+                apsa_rule=None, tomb_gap=20, liar_vote=False)
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -146,7 +156,20 @@ def run_once(cfg):
                 revoke_at_ms=cfg["revoke_at_ms"], base_port=cfg["base_port"],
                 truth=world["truth"], drifts=cfg.get("drifts"),
                 slot_digest=cfg["slot_digest"], batch_ms=cfg["batch_ms"],
-                slash=cfg["slash"], rate_mode=cfg["rate_mode"])
+                slash=cfg["slash"], rate_mode=cfg["rate_mode"],
+                sensor_noise=cfg["sensor_noise"],
+                slash_window=cfg["slash_window"],
+                refute_quorum=cfg["refute_quorum"],
+                confirm_quorum=cfg["confirm_quorum"],
+                quorum_scope=cfg["quorum_scope"], confirm_cap=cfg["confirm_cap"],
+                refute_cap=cfg["refute_cap"], rebut=cfg["rebut"],
+                admit_rule=cfg["admit_rule"], liar_k=cfg["liar_k"],
+                vote_order=cfg["vote_order"], sensor_filter=cfg["sensor_filter"],
+                self_trust=cfg["self_trust"], pull_priority=cfg["pull_priority"],
+                pull_quiet_cap=cfg["pull_quiet_cap"], self_admit=cfg["self_admit"],
+                arbiter=cfg["arbiter"], kinematic_gate=cfg["kinematic_gate"],
+                apsa_rule=cfg["apsa_rule"], tomb_gap=cfg["tomb_gap"],
+                liar_vote=cfg["liar_vote"])
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -184,6 +207,47 @@ def run_once(cfg):
         rec["slot_digest"] = False
     rec["batch_ms"], rec["slash"] = cfg["batch_ms"], cfg["slash"]
     rec["rate_mode"] = cfg["rate_mode"]
+    if cfg["sensor_noise"]:
+        rec["sensor_noise"] = cfg["sensor_noise"]
+    rec["slash_window"] = cfg["slash_window"]
+    if cfg["refute_quorum"] > 1:
+        rec["refute_quorum"] = cfg["refute_quorum"]
+    if cfg["confirm_quorum"] > 1:
+        rec["confirm_quorum"] = cfg["confirm_quorum"]
+    if cfg["quorum_scope"] != "all":
+        rec["quorum_scope"] = cfg["quorum_scope"]
+    if cfg["confirm_cap"]:
+        rec["confirm_cap"] = cfg["confirm_cap"]
+    if cfg["refute_cap"]:
+        rec["refute_cap"] = cfg["refute_cap"]
+    if cfg["rebut"]:
+        rec["rebut"] = True
+    if cfg["admit_rule"] != "trust":
+        rec["admit_rule"] = cfg["admit_rule"]
+    if cfg["liar_k"]:
+        rec["liar_k"] = cfg["liar_k"]
+    if cfg["vote_order"] != "arrival":
+        rec["vote_order"] = cfg["vote_order"]
+    if not cfg["sensor_filter"]:
+        rec["sensor_filter"] = False
+    if cfg["self_trust"] != "full":
+        rec["self_trust"] = cfg["self_trust"]
+    if cfg["pull_priority"] != "log":
+        rec["pull_priority"] = cfg["pull_priority"]
+    if cfg["pull_quiet_cap"]:
+        rec["pull_quiet_cap"] = cfg["pull_quiet_cap"]
+    if cfg["self_admit"] != "always":
+        rec["self_admit"] = cfg["self_admit"]
+    if cfg["arbiter"] != "scalar":
+        rec["arbiter"] = cfg["arbiter"]
+    if cfg["kinematic_gate"]:
+        rec["kinematic_gate"] = cfg["kinematic_gate"]
+    if cfg["apsa_rule"]:
+        rec["apsa_rule"] = cfg["apsa_rule"]
+    if cfg["liar_vote"]:
+        rec["liar_vote"] = True
+    if cfg["arbiter"] != "scalar":
+        rec["tomb_gap"] = cfg["tomb_gap"]
     rec["metrics"] = m
     return rec, results
 
@@ -289,6 +353,12 @@ def compute_metrics(cfg, world, results):
     tot = len(kset) * len(honest)
     m["ref_match_frac"] = _r(ok / tot)
     m["ref_diff"] = {k: _r(v / tot) for k, v in causes.items()}
+    # v2.0: эталон только по слотам, где эталонное событие писал честный узел
+    # (правдивые события атакующего после надгробия намеренно не принимаются)
+    hk = [k for k in kset if ref.get(keys[k]) in labels
+          and labels[ref[keys[k]]][4] in honest]
+    okh = sum(1 for i in honest for k in hk if final[i][k] == ref.get(keys[k], ""))
+    m["ref_match_honest_frac"] = _r(okh / max(len(hk) * len(honest), 1))
     m["div_per_s"] = [round(x, 3) for x in div]
     _, win = net.parse_partition(PARTITIONS.get(cfg["partition"], cfg["partition"]))
     if win:
@@ -404,6 +474,42 @@ def compute_metrics(cfg, world, results):
     sl = [(i, int(v), ms) for i in honest for v, ms in results[i]["slashed"].items()]
     m["slashed_honest"] = sum(1 for (_, v, _) in sl if v in honest)
     m["slashed_attacker_by"] = sum(1 for (_, v, _) in sl if v not in honest)
+    m["sensor_flips"] = sum(results[i].get("sensor_flips", 0) for i in honest)
+    m["thymus_blocked"] = sum(results[i].get("thymus_blocked", 0) for i in honest)
+    # v1.4 шаг 0: совпадают ли множества голосов и решения о приёме у честных
+    vs = [results[i].get("vstate") for i in honest]
+    if all(v is not None for v in vs):
+        common = set(vs[0])
+        for v in vs[1:]:
+            common |= set(v)
+        same = diff = dis_same = dis_diff = 0
+        for e in common:
+            # сравниваем узлы, кроме автора (автор принимает своё всегда);
+            # событие считаем, только если оно есть у всех остальных честных
+            au = next(v[e][2] for v in vs if e in v)
+            have = [v for i, v in zip(honest, vs) if i != au]
+            if not all(e in v for v in have):
+                continue
+            digs = {v[e][0] for v in have}
+            adm = {v[e][1] for v in have}
+            if len(digs) == 1:
+                same += 1
+                dis_same += len(adm) > 1
+            else:
+                diff += 1
+                dis_diff += len(adm) > 1
+        m["vset_equal_frac"] = _r(same / max(same + diff, 1))
+        m["admit_disagree_same_set"] = dis_same
+        m["admit_disagree_diff_set"] = dis_diff
+    m["replays"] = sum(results[i].get("replays", 0) for i in honest)
+    # v1.4: недоставленные записи журнала честных авторов к концу прогона
+    if all("held_n" in results[i] for i in honest):
+        gaps = [results[j]["own_seq"] - results[i]["held_n"][j]
+                for i in honest for j in honest if i != j]
+        m["journal_gap_sum"] = sum(gaps)
+        m["journal_gap_max"] = max(gaps) if gaps else 0
+    m["strikes_on_honest"] = sum(k for i in honest for v, k in results[i].get("strikes", {}).items()
+                                 if int(v) in honest)
     if attacked:
         ts = [ms - sn.ATTACK_START_MS for (_, v, ms) in sl if v == cfg["attacker"]]
         m["slash_after_attack_s"] = (None if not ts else
@@ -467,6 +573,37 @@ def attack_metrics(cfg, results, honest, keys, kidx, tick):
         r["blocked_frac"] = None if passed is None else _r(1 - passed / max(len(items), 1))
         if typ == "T4":
             ids = {eid for (eid, _, _, _) in items}
+            # v1.3: время вытеснения (TtE) - сколько секунд каждая ложь была
+            # в картине большинства честных узлов
+            delta = {}
+            for i in honest:
+                cur = {}
+                for (tk, ki, eid, vh) in results[i]["changes"]:
+                    old = cur.get(ki)
+                    if old in ids:
+                        delta.setdefault(old, {})
+                        delta[old][tk] = delta[old].get(tk, 0) - 1
+                    if eid in ids:
+                        delta.setdefault(eid, {})
+                        delta[eid][tk] = delta[eid].get(tk, 0) + 1
+                    cur[ki] = eid
+            end_tk = cfg["duration_s"] * 1000 // tick
+            half = len(honest) / 2
+            ttes = []
+            for eid, d in delta.items():
+                cnt, prev, maj = 0, None, 0
+                for tk in sorted(d):
+                    if prev is not None and cnt > half:
+                        maj += tk - prev
+                    cnt += d[tk]
+                    prev = tk
+                if prev is not None and cnt > half:
+                    maj += end_tk - prev
+                if maj:
+                    ttes.append(maj * tick / 1000)
+            r["lies_in_majority"] = len(ttes)
+            r["tte_max_s"] = _r(max(ttes), 2) if ttes else 0.0
+            r["tte_over_1_5s"] = sum(1 for x in ttes if x > 1.5)
             trans = []
             for i in honest:
                 cur, cnt = {}, 0
@@ -530,6 +667,24 @@ def grid(which):
                         for s in seeds:
                             cfgs.append(dict(branch=branch, topology=topo,
                                              loss=loss, partition=part, seed=s))
+    if which == "probe14":
+        # v1.4: probe13 + худшие по сходимости конфигурации v1.3 (шум 3 %)
+        for att in ("none", "T4", "T7"):
+            for s in range(1, 6):
+                cfgs.append(dict(branch="B", loss=0.05, attack=att, seed=s))
+        for topo, loss, part in (("chain", 0.4, "isolate"), ("full", 0.2, "isolate"),
+                                 ("chain", 0.2, "none"), ("full", 0.4, "none")):
+            for s in range(1, 6):
+                cfgs.append(dict(branch="B", topology=topo, loss=loss,
+                                 partition=part, seed=s))
+    if which == "probe13":
+        # разведка v1.3: без атаки, T4, T7 x 5 зёрен + цепочка 40 % isolate x 5
+        for att in ("none", "T4", "T7"):
+            for s in range(1, 6):
+                cfgs.append(dict(branch="B", loss=0.05, attack=att, seed=s))
+        for s in range(1, 6):
+            cfgs.append(dict(branch="B", topology="chain", loss=0.4,
+                             partition="isolate", seed=s))
     if which == "check12":
         # короткая проверка раздельных номеров: цепочка 40 % и трафик без атак
         for part in ("none", "isolate", "split"):
@@ -578,6 +733,43 @@ def run_grid(cfgs, out, workers, extra):
                 "n", "seed", "branch", "loss", "topology", "partition", "attack",
                 "attacker", "trust_init", "duration_s", "events_until_s",
                 "tick_ms", "K", "batch_ms", "slash", "rate_mode")}
+            if dict(DEFAULTS, **c)["sensor_noise"]:
+                rec["sensor_noise"] = dict(DEFAULTS, **c)["sensor_noise"]
+            rec["slash_window"] = dict(DEFAULTS, **c)["slash_window"]
+            for q in ("refute_quorum", "confirm_quorum"):
+                if dict(DEFAULTS, **c)[q] > 1:
+                    rec[q] = dict(DEFAULTS, **c)[q]
+            if dict(DEFAULTS, **c)["quorum_scope"] != "all":
+                rec["quorum_scope"] = dict(DEFAULTS, **c)["quorum_scope"]
+            if dict(DEFAULTS, **c)["admit_rule"] != "trust":
+                rec["admit_rule"] = dict(DEFAULTS, **c)["admit_rule"]
+            if dict(DEFAULTS, **c)["liar_k"]:
+                rec["liar_k"] = dict(DEFAULTS, **c)["liar_k"]
+            if dict(DEFAULTS, **c)["vote_order"] != "arrival":
+                rec["vote_order"] = dict(DEFAULTS, **c)["vote_order"]
+            if not dict(DEFAULTS, **c)["sensor_filter"]:
+                rec["sensor_filter"] = False
+            if dict(DEFAULTS, **c)["self_trust"] != "full":
+                rec["self_trust"] = dict(DEFAULTS, **c)["self_trust"]
+            if dict(DEFAULTS, **c)["pull_priority"] != "log":
+                rec["pull_priority"] = dict(DEFAULTS, **c)["pull_priority"]
+            if dict(DEFAULTS, **c)["pull_quiet_cap"]:
+                rec["pull_quiet_cap"] = dict(DEFAULTS, **c)["pull_quiet_cap"]
+            if dict(DEFAULTS, **c)["self_admit"] != "always":
+                rec["self_admit"] = dict(DEFAULTS, **c)["self_admit"]
+            if dict(DEFAULTS, **c)["arbiter"] != "scalar":
+                rec["arbiter"] = dict(DEFAULTS, **c)["arbiter"]
+            if dict(DEFAULTS, **c)["kinematic_gate"]:
+                rec["kinematic_gate"] = dict(DEFAULTS, **c)["kinematic_gate"]
+            if dict(DEFAULTS, **c)["apsa_rule"]:
+                rec["apsa_rule"] = dict(DEFAULTS, **c)["apsa_rule"]
+            if dict(DEFAULTS, **c)["liar_vote"]:
+                rec["liar_vote"] = True
+            if dict(DEFAULTS, **c)["arbiter"] != "scalar":
+                rec["tomb_gap"] = dict(DEFAULTS, **c)["tomb_gap"]
+            for q in ("confirm_cap", "refute_cap", "rebut"):
+                if dict(DEFAULTS, **c)[q]:
+                    rec[q] = dict(DEFAULTS, **c)[q]
             rec["error"] = repr(e)
         finally:
             ports.put(port)
@@ -600,7 +792,28 @@ def _cfg_key(r):
                                 "partition", "attack", "trust_init",
                                 "duration_s")) + (r.get("batch_ms", 0),
                                                   r.get("slash", False),
-                                                  r.get("rate_mode", "hlc"))
+                                                  r.get("rate_mode", "hlc"),
+                                                  r.get("sensor_noise", 0.0),
+                                                  r.get("slash_window", 1),
+                                                  r.get("refute_quorum", 1),
+                                                  r.get("confirm_quorum", 1),
+                                                  r.get("quorum_scope", "all"),
+                                                  r.get("confirm_cap"),
+                                                  r.get("refute_cap"),
+                                                  r.get("rebut", False),
+                                                  r.get("admit_rule", "trust"),
+                                                  r.get("liar_k", 0),
+                                                  r.get("vote_order", "arrival"),
+                                                  r.get("sensor_filter", True),
+                                                  r.get("self_trust", "full"),
+                                                  r.get("pull_priority", "log"),
+                                                  r.get("pull_quiet_cap", 0),
+                                                  r.get("self_admit", "always"),
+                                                  r.get("arbiter", "scalar"),
+                                                  r.get("kinematic_gate", 0),
+                                                  r.get("apsa_rule"),
+                                                  r.get("tomb_gap", 20),
+                                                  r.get("liar_vote", False))
 
 
 # ------------------------------------------------------------------- отчёт
@@ -814,6 +1027,9 @@ def _rule_rows(path):
             _fmt(statistics.mean(x["attacks"]["T5"]["stored_frac_at_honest"]
                                  for x in t5), 4),
             _fmt(_med([x["attacks"]["T5"]["time_to_block_s"] for x in t5]), 2))
+    t4 = sel(attack="T4")
+    out["v1.3: T4 прошло лжи (сумма по зёрнам)"] = str(sum(
+        x["attacks"]["T4"]["passed"] or 0 for x in t4))
     out["v1.2: T5 = эталону"] = _fmt(statistics.mean(
         x["ref_match_frac"] for x in t5), 4)
     dl = [x for x in sel() if x.get("delay_ms_p50") is not None]
@@ -898,7 +1114,8 @@ def main():
     ap.add_argument("--nodes", type=int, default=5)
     ap.add_argument("--tick-ms", type=int, default=TICK_MS)
     ap.add_argument("--K", type=int, default=10)
-    ap.add_argument("--grid", choices=("all", "conv", "attacks", "sens", "check12"))
+    ap.add_argument("--grid", choices=("all", "conv", "attacks", "sens", "check12", "probe13",
+                                       "probe14"))
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--out", default=os.path.join(HERE, "results.jsonl"))
     ap.add_argument("--report")
@@ -914,6 +1131,52 @@ def main():
                     help="лимит частоты: kseq - раздельные номера glyph/validation "
                          "(v1.2, по умолчанию) | seq - общий номер (v1.2, первая "
                          "сетка) | hlc - по секунде HLC (v1.0, v1.1)")
+    ap.add_argument("--sensor-noise", type=float, default=0.0,
+                    help="v1.3: доля измерений датчика с неверным вердиктом (0.01 = 1 %%)")
+    ap.add_argument("--slash-window", type=int, default=3,
+                    help="v1.3: штраф после K ложных опровержений (и >=25 %% проверенно-верных "
+                         "из окна 200); 1 = мгновенный штраф v1.2")
+    ap.add_argument("--refute-quorum", type=int, default=2,
+                    help="v1.3: опровержение действует, когда событие опровергли N разных узлов")
+    ap.add_argument("--confirm-quorum", type=int, default=1,
+                    help="v1.3: подтверждение действует, когда событие подтвердили N разных узлов")
+    ap.add_argument("--quorum-scope", default="all", choices=("all", "trust"),
+                    help="v1.3: кворум держит вес события и доверие (all) или только доверие (trust)")
+    ap.add_argument("--confirm-cap", type=float, default=None,
+                    help="v1.3: потолок веса одного подтверждения (ниже порога приёма 1.0)")
+    ap.add_argument("--refute-cap", type=float, default=None,
+                    help="v1.3: потолок веса одного опровержения")
+    ap.add_argument("--admit-rule", default="trust",
+                    choices=("trust", "net-balance", "log-odds", "sensor-veto"),
+                    help="v1.3: правило приёма - доверие Q2 или функция от множеств оценщиков")
+    ap.add_argument("--liar-k", type=int, default=0,
+                    help="v1.3: автор с K событиями, опровергнутыми >=2 узлами, теряет вес (0 = выкл)")
+    ap.add_argument("--vote-order", default="arrival", choices=("arrival", "canonical"),
+                    help="v1.4: применять голоса в порядке прихода или в каноничном (HLC, id)")
+    ap.add_argument("--sensor-filter", default="on", choices=("on", "off"),
+                    help="v1.4: off - собственный датчик судьи не фильтрует опровержения при приёме")
+    ap.add_argument("--self-trust", default="full", choices=("full", "symmetric"),
+                    help="v1.4: доверие к себе 1.0 (full) или считается как к другим (symmetric)")
+    ap.add_argument("--pull-priority", default="log", choices=("log", "validations"),
+                    help="v1.4: PULL по порядку журнала (log) или сначала недостающие голоса")
+    ap.add_argument("--pull-quiet-cap", type=int, default=0,
+                    help="v1.4: записей в ответе PULL, когда своих событий уже нет (0 = как всегда, 24)")
+    ap.add_argument("--self-admit", default="always", choices=("always", "rule"),
+                    help="v1.4: своё событие по общему ключу - принимать всегда или по общему правилу")
+    ap.add_argument("--arbiter", default="scalar", choices=("scalar", "anis", "anis-literal"),
+                    help="v2.0: scalar - доверие W (v1.4); anis - APSA + надгробия с поправками; "
+                         "anis-literal - буквально по ТЗ ANIS v2.0")
+    ap.add_argument("--kinematic-gate", type=int, default=0,
+                    help="v2.0: скачок координаты цели больше N за одно изменение - аномалия автора (0 = выкл)")
+    ap.add_argument("--apsa-rule", default=None, choices=("share", "tz"),
+                    help="v2.0: правило INTENTIONAL - доля >= 25 %% (share, по умолчанию для anis) "
+                         "или S >= 0.70 по ТЗ (tz, по умолчанию для anis-literal)")
+    ap.add_argument("--tomb-gap", type=int, default=20,
+                    help="v2.0: на сколько событий окно должно обновиться до второй фазы карантина")
+    ap.add_argument("--liar-vote", action="store_true",
+                    help="v2.0: хоронить автора, у которого >= 25 %% из 200 его общих событий опровергнуты кворумом 2")
+    ap.add_argument("--rebut", action="store_true",
+                    help="v1.3: отвечать подтверждением на опровержение того, что мой сенсор видит верным")
     ap.add_argument("--no-slot-digest", action="store_true",
                     help="PULL v1: digest без карты слотов (только журнал)")
     a = ap.parse_args()
@@ -932,6 +1195,27 @@ def main():
     extra["batch_ms"] = a.batch_ms
     extra["slash"] = a.slash == "on"
     extra["rate_mode"] = a.rate
+    extra["sensor_noise"] = a.sensor_noise
+    extra["slash_window"] = a.slash_window
+    extra["refute_quorum"] = a.refute_quorum
+    extra["confirm_quorum"] = a.confirm_quorum
+    extra["quorum_scope"] = a.quorum_scope
+    extra["confirm_cap"] = a.confirm_cap
+    extra["refute_cap"] = a.refute_cap
+    extra["rebut"] = a.rebut
+    extra["admit_rule"] = a.admit_rule
+    extra["liar_k"] = a.liar_k
+    extra["vote_order"] = a.vote_order
+    extra["sensor_filter"] = a.sensor_filter == "on"
+    extra["self_trust"] = a.self_trust
+    extra["pull_priority"] = a.pull_priority
+    extra["pull_quiet_cap"] = a.pull_quiet_cap
+    extra["self_admit"] = a.self_admit
+    extra["arbiter"] = a.arbiter
+    extra["kinematic_gate"] = a.kinematic_gate
+    extra["apsa_rule"] = a.apsa_rule
+    extra["tomb_gap"] = a.tomb_gap
+    extra["liar_vote"] = a.liar_vote
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return

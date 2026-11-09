@@ -34,6 +34,7 @@ import random
 import socket
 import time
 from bisect import bisect_left, bisect_right, insort
+from collections import deque
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -41,6 +42,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 import swarm_net as net
 import swarm_wire as wire
+from apsa_engine import APSASanitaryAudit, INTENTIONAL
+from tombstone_registry import TombstoneRegistry
 
 GEP = "0.1"
 STATUSES = ("clear", "obstacle", "hazard", "unknown")
@@ -319,8 +322,10 @@ class Sensor:
     WINDOW_MS = 5_000
     POS_TOL = 300
 
-    def __init__(self, truth, seed, idx):
+    def __init__(self, truth, seed, idx, noise=0.0):
         self.truth, self.seed, self.idx = truth, seed, idx
+        self.noise = noise      # v1.3: доля измерений с неверным вердиктом
+        self.flips = 0
 
     def covers(self, key, now_ms):
         h = hashlib.sha256(("cov:%s:%d:%s:%d" % (
@@ -334,6 +339,18 @@ class Sensor:
         return vals[i:max(j, i + 1)]
 
     def check(self, key, value, hlc_l, now_ms):
+        ok = self._check(key, value, hlc_l, now_ms)
+        if self.noise:
+            # v1.3: одно измерение на событие - повторная проверка того же
+            # события даёт тот же ответ (зерно, узел, ключ, значение, hlc)
+            h = hashlib.sha256(("noise:%s:%d:%s:%r:%d" % (
+                self.seed, self.idx, key, value, hlc_l)).encode()).digest()
+            if int.from_bytes(h[:4], "big") < self.noise * 2 ** 32:
+                self.flips += 1
+                return not ok
+        return ok
+
+    def _check(self, key, value, hlc_l, now_ms):
         cand = self.values_in(key, hlc_l - self.WINDOW_MS,
                               min(hlc_l + self.WINDOW_MS, now_ms))
         if key.endswith(".status"):
@@ -383,6 +400,12 @@ class Node:
     # v1.2: лимит по seq автора - seq <= SEQ_RATE*(сек HLC + 1) + SEQ_BURST.
     # Решение записано в подписанном событии и не зависит от порядка прихода
     # и от того, сколько событий легло в одну секунду HLC при отставших часах.
+    # v1.3: оконный штраф. Обвинитель штрафуется, когда опроверг не меньше
+    # slash_window событий из последних SLASH_WIN, которые мой сенсор признал
+    # верными, и это не меньше SLASH_SHARE от них. Честный с шумом P опровергает
+    # верное с долей ~0.6*P (покрытие * шум), клеветник T7 - почти всё.
+    SLASH_WIN = 200
+    SLASH_SHARE = 0.25
     SEQ_RATE = 20                            # 2x честного темпа (10 событий/с)
     SEQ_BURST = 200
 
@@ -408,7 +431,11 @@ class Node:
         self.by_seq = {}
         self.seq = 0
         self.trust = [float(cfg["trust_init"])] * self.n
-        self.trust[idx] = 1.0
+        # v1.4 P3: "symmetric" - доверие к себе считается так же, как к другим,
+        # иначе одна и та же оценка весит у её автора больше, чем у остальных
+        self.self_trust = cfg.get("self_trust", "full")
+        if self.self_trust == "full":
+            self.trust[idx] = 1.0
         self.vsum = {}
         self.vseen = set()
         self.vpending = {}
@@ -419,7 +446,8 @@ class Node:
         self.kseq = {"glyph": 0, "validation": 0}   # свои номера по видам
         self.by_kseq = set()                        # (автор, вид, kseq)
         self.seq_lead = {}      # автор -> max(seq - SEQ_RATE*(сек HLC + 1))
-        self.sensor = Sensor(cfg["truth"], seed, idx)
+        self.sensor = Sensor(cfg["truth"], seed, idx,
+                             float(cfg.get("sensor_noise", 0.0) or 0.0))
         self.truth = cfg["truth"]
         self.nbrs = net.neighbors(cfg["topology"], self.n, idx)
         attack = cfg.get("attack") or "none"
@@ -454,6 +482,79 @@ class Node:
         self.batch_ms = int(cfg.get("batch_ms", 0) or 0)
         self.bq = max(1, self.batch_ms // self.tick_ms) if self.batch_ms else 0
         self.slash = bool(cfg.get("slash", False))
+        # v2.0-anis: дискретный арбитраж вместо порога доверия
+        #   "scalar" - как v1.4; "anis" - с поправками; "anis-literal" - буквально по ТЗ
+        self.arbiter = cfg.get("arbiter", "scalar")
+        self.anis = self.arbiter != "scalar"
+        lit = self.arbiter == "anis-literal"
+        self.kin_gate = int(cfg.get("kinematic_gate", 0) or 0)
+        self.kin_n = {}             # автор -> сколько его координат я проверил
+        # v2.0: признак лжеца по голосам - его общие события, опровергнутые
+        # кворумом из 2 узлов, среди последних 200 его общих событий
+        self.liar_vote = bool(cfg.get("liar_vote", False))
+        self.lie_hist = {}          # автор -> deque eid его последних общих событий
+        self.lie_bad = {}           # автор -> множество eid с R >= 2
+        self.tomb_events = []
+        if self.anis:
+            self.slash = True
+            self.apsa = APSASanitaryAudit(
+                mode="time" if lit else "count",
+                rule=cfg.get("apsa_rule") or ("tz" if lit else "share"))
+            self.tomb_gap = int(cfg.get("tomb_gap", 20) or 20)
+            self.tombs = TombstoneRegistry(cfg["n"], idx, two_phase=not lit,
+                                           quorum=1 if lit else 2,
+                                           thymus="literal" if lit else "bft")
+        self.slash_k = int(cfg.get("slash_window", 1) or 1)   # 1 = v1.2
+        self.true_seq = 0           # сколько общих событий мой сенсор признал верными
+        self.strikes = {}           # обвинитель -> deque(true_seq в момент удара)
+        self.strike_n = {}          # обвинитель -> всего ударов
+        # v1.3: опровержение действует, когда событие опровергли не меньше
+        # refute_quorum разных узлов; 1 = как в v1.2
+        self.quorum = int(cfg.get("refute_quorum", 1) or 1)
+        # и подтверждение тоже (иначе одно шумовое подтверждение лжи весом до
+        # +2 перевешивает опровержения, которым нужен кворум)
+        self.cquorum = int(cfg.get("confirm_quorum", 1) or 1)
+        self.rwait = {}             # (eid, вердикт) -> оценки, ждущие кворума
+        self.applied = {}           # "вердикт@автор" -> применено оценок
+        # v1.3 (Линза): правило приёма - функция от множеств оценщиков
+        # "trust" = Q2 как было; "net-balance": 1 + C - 2R >= 0.5;
+        # "log-odds": C - R >= 0; "sensor-veto": R < 2 и я сам не опроверг
+        self.admit_rule = cfg.get("admit_rule", "trust")
+        self.vset = {}              # eid -> (подтвердившие, опровергшие)
+        # v1.4: P1 - голоса применяются в каноничном порядке (HLC, id оценки),
+        # а не в порядке прихода; P2 - собственный датчик судьи не фильтрует
+        # опровержения при приёме, только бьёт по окну штрафа
+        self.vorder = cfg.get("vote_order", "arrival")
+        self.sensor_filter = cfg.get("sensor_filter", True)
+        self.vsorted = []           # canonical: [(ключ, запись)] по ключу
+        self.vdirty = False
+        self.vflush_clock = None
+        self.replays = 0
+        # v1.4 доставка: D1 "validations" - из недостающего сначала голоса;
+        # D2 - сколько записей в ответе PULL, когда своих событий уже нет
+        # P4: "rule" - по общим ключам своё событие судится по тому же правилу,
+        # что и чужое (иначе при шуме автор держит то, что остальные отвергли)
+        self.self_admit = cfg.get("self_admit", "always")
+        if cfg.get("arbiter", "scalar") != "scalar":
+            self.self_admit = "rule"    # anis: своё событие - по общему правилу
+        self.pull_priority = cfg.get("pull_priority", "log")
+        self.pull_quiet_cap = int(cfg.get("pull_quiet_cap", 0) or 0)
+        # история автора как множество: его события, опровергнутые >= 2 узлами;
+        # от LIAR_K таких событий автор теряет вес (тоже без зависимости от порядка)
+        self.liar_k = int(cfg.get("liar_k", 0) or 0)
+        self.refuted_q = {}         # автор -> множество его eid с R >= 2
+        self.shared_n = {}          # автор -> сколько его общих событий я видел
+        # "all": кворум держит и вес события, и доверие; "trust": первое же
+        # опровержение снимает вес события, доверие автора - только по кворуму
+        self.qscope = cfg.get("quorum_scope", "all")
+        cap = cfg.get("confirm_cap")
+        self.ccap = float(cap) if cap else None   # потолок веса одного подтверждения
+        # v1.3: ответное подтверждение - на опровержение события, которое мой
+        # сенсор видит верным и которое ушло в карантин, отвечаю подтверждением
+        self.rebut = bool(cfg.get("rebut", False))
+        self.rebuttals = 0
+        rcap = cfg.get("refute_cap")
+        self.rcap = float(rcap) if rcap else None # и одного опровержения
         self.codec = (wire.Codec(self.keys_list, [k.author for k in self.keys])
                       if self.bq else None)
         self.outbox = []            # свои события до закрытия пакета
@@ -473,8 +574,38 @@ class Node:
         r = self.revoked.get(a)
         if r is not None and ev.hlc[0] >= r[0]:
             return False
-        if owner_of(ev.key) is not None or a == self.me:
+        if owner_of(ev.key) is not None or (a == self.me and self.self_admit == "always"):
             return True                 # правило владельца: хватает подписи
+        if self.vdirty and self.vflush_clock != self.clock:
+            self.vflush_clock = self.clock      # не чаще раза на момент времени
+            self.flush_votes()
+        if self.anis:
+            if a in self.slashed:
+                return False
+            cs, rs = self.vset.get(eid, ((), ()))
+            sl = self.slashed
+            sus = self.tombs.is_suspect
+            c = sum(1 for x in cs if x not in sl and not sus(x))
+            r = sum(1 for x in rs if x not in sl and not sus(x))
+            return r < 2 or c >= r
+        rule = self.admit_rule
+        if rule != "trust":
+            cs, rs = self.vset.get(eid, ((), ()))
+            sl = self.slashed
+            c = sum(1 for x in cs if x not in sl)
+            r = sum(1 for x in rs if x not in sl)
+            nq = len(self.refuted_q.get(a, ()))
+            liar = (self.liar_k and nq >= self.liar_k
+                    and nq >= 0.10 * self.shared_n.get(a, 0))   # доля, не счёт
+            if liar:
+                sl = set(sl) | {a}      # лжец: вес автора 0, без подтверждения не войдёт
+            if rule == "net-balance":
+                return (0 if a in sl else 1) + c - 2 * r >= 0.5
+            if rule == "log-odds":
+                return c - r >= (1 if liar else 0)
+            if rule == "sensor-veto":
+                return r < 2 and self.me not in rs
+            raise ValueError(rule)
         return self.trust[a] + self.vsum.get(eid, 0.0) >= self.THRESH - 1e-9
 
     def apply_validation(self, vev):
@@ -495,6 +626,14 @@ class Node:
         verdict = body.get("verdict")
         if verdict not in ("confirmed", "refuted"):
             return
+        cs, rs = self.vset.setdefault(target.eid, (set(), set()))
+        (cs if verdict == "confirmed" else rs).add(v)
+        if (self.anis and self.liar_vote and verdict == "refuted" and len(rs) == 2
+                and subj != self.me and not self.is_attacker):
+            self.lie_bad.setdefault(subj, set()).add(target.eid)
+            self.liar_check(subj)
+        if verdict == "refuted" and len(rs) >= 2:
+            self.refuted_q.setdefault(subj, set()).add(target.eid)
         if self.slash and v in self.slashed:
             return
         if (self.slash and verdict == "refuted" and v != self.me
@@ -505,39 +644,119 @@ class Node:
             # Accuser slashing (v1.1): мой собственный сенсор видит, что
             # опровергнутое значение было правдой. Обвинитель лжёт - доверие
             # к нему 0 навсегда, его прошлые оценки отменяются пересчётом.
-            self.slashed[v] = self.clock
-            self.recompute_trust()
-            return
+            if self.anis:
+                self.apsa.false_refutation(v, self.clock)
+                st, sv, _, _ = self.apsa.verdict(v, self.clock, "acc")
+                if st == INTENTIONAL:
+                    self.bury("acc", v, sv, self.tomb_gap, self.apsa.true_seq)
+                if (self.rebut and subj != self.me
+                        and (self.me, target.eid) not in self.vseen):
+                    self.rebuttals += 1
+                    self.emit_validation(target, "confirmed", self.clock)
+            elif self.slash_k <= 1 or self.strike(v):
+                self.slashed[v] = self.clock
+                self.recompute_trust()
+            elif (self.rebut and subj != self.me
+                  and (self.me, target.eid) not in self.vseen):
+                # v1.3: у меня оно в картине, но у тех, кто не видит ключ,
+                # ушло в карантин - отвечаю подтверждением, один раз
+                self.rebuttals += 1
+                self.emit_validation(target, "confirmed", self.clock)
+            if (self.sensor_filter and not self.anis) or v in self.slashed:
+                return  # v1.3: ниже порога опровержение просто не учитывается
         ev_in = (body.get("evidence") or {}).get("applied_in")
         bonus = self.EVIDENCE if ev_in else 1.0
-        self.vlog.append((v, target.eid, subj, verdict, bonus))
-        self._apply(v, target.eid, subj, verdict, bonus)
+        rec = (v, target.eid, subj, verdict, bonus)
+        if self.vorder == "canonical":
+            key = (vev.hlc[0], vev.hlc[1], vev.eid)
+            if not self.vsorted or key > self.vsorted[-1][0]:
+                self.vsorted.append((key, rec))
+                self._feed(rec)          # пришёл по порядку - как полный пересчёт
+            else:
+                insort(self.vsorted, (key, rec))
+                self.vdirty = True       # не по порядку - пересчёт в начале такта
+            return
+        self.vlog.append(rec)
+        self._feed(rec)
 
-    def _apply(self, v, eid, subj, verdict, bonus):
+    def flush_votes(self):
+        """v1.4 canonical: если голос пришёл не по порядку, пересчитать всё
+        в каноничном порядке; итог зависит только от множества голосов."""
+        if self.vdirty:
+            self.vdirty = False
+            self.recompute_trust()
+
+    def _feed(self, rec):
+        q = self.quorum if rec[3] == "refuted" else self.cquorum
+        if q > 1:
+            split = self.qscope == "trust"
+            if split:
+                self._apply(*rec, part="weight")
+            w = self.rwait.setdefault((rec[1], rec[3]), [])
+            w.append(rec)
+            part = "trust" if split else "both"
+            if len(w) == q:
+                for r in w:
+                    self._apply(*r, part=part)
+            elif len(w) > q:
+                self._apply(*rec, part=part)
+            return
+        self._apply(*rec)
+
+    def strike(self, v):
+        """v1.3: удар обвинителю; True - порог окна пройден, штрафовать."""
+        self.strike_n[v] = self.strike_n.get(v, 0) + 1
+        q = self.strikes.setdefault(v, deque())
+        q.append(self.true_seq)
+        while q and q[0] <= self.true_seq - self.SLASH_WIN:
+            q.popleft()
+        # доля от полного окна: в начале прогона, пока проверено мало, два-три
+        # шумовых удара не должны давать 25 %
+        return len(q) >= self.slash_k and len(q) >= self.SLASH_SHARE * self.SLASH_WIN
+
+    def _apply(self, v, eid, subj, verdict, bonus, part="both"):
+        if part != "weight":
+            k = "%s@%d" % (verdict, subj)
+            self.applied[k] = self.applied.get(k, 0) + 1
         w = self.trust[v] * bonus
         if verdict == "confirmed":
-            self.vsum[eid] = self.vsum.get(eid, 0.0) + w
+            if part != "trust":
+                self.vsum[eid] = self.vsum.get(eid, 0.0) + (
+                    w if self.ccap is None else min(w, self.ccap))
             d = self.CONFIRM * w
         else:
-            self.vsum[eid] = self.vsum.get(eid, 0.0) - w
+            if part != "trust":
+                self.vsum[eid] = self.vsum.get(eid, 0.0) - (
+                    w if self.rcap is None else min(w, self.rcap))
             d = self.REFUTE * w
-        if subj != self.me and subj not in self.slashed:
+        if part == "weight":
+            return
+        if (subj != self.me or self.self_trust != "full") and subj not in self.slashed:
             self.trust[subj] = min(1.0, max(0.0, self.trust[subj] + d))
 
     def recompute_trust(self):
         """Доверие и веса так, будто оштрафованные обвинители не говорили
         ничего: тот же порядок validation, те же правила, без их голосов."""
         self.trust = [float(self.cfg["trust_init"])] * self.n
-        self.trust[self.me] = 1.0
+        if self.self_trust == "full":
+            self.trust[self.me] = 1.0
         for s in self.slashed:
             self.trust[s] = 0.0
         self.vsum = {}
+        self.rwait = {}
+        if self.vorder == "canonical":
+            self.replays += 1
+            self.vdirty = False
+            self.vsorted = [kr for kr in self.vsorted if kr[1][0] not in self.slashed]
+            for _, rec in self.vsorted:
+                self._feed(rec)
+            return
         keep = []
         for rec in self.vlog:
             if rec[0] in self.slashed:
                 continue
             keep.append(rec)
-            self._apply(*rec)
+            self._feed(rec)
         self.vlog = keep
 
     # ------------------------------------------------------------ журнал
@@ -606,8 +825,14 @@ class Node:
             return None
         a = self.idx_of[env["author"]]
         body, kind = env["body"], env["kind"]
+        if self.anis and self.tombs.is_dead(a):
+            self.reject("tombstoned", a,
+                        body.get("seq") if isinstance(body, dict) else None, now_ms)
+            return None
         if kind == "key_event":
             return self.accept_key_event(env, a, now_ms)
+        if kind == "tombstone":
+            return self.accept_tombstone(env, a, now_ms)
         if kind not in ("glyph", "validation") or not isinstance(body, dict):
             self.reject("schema")
             return None
@@ -675,11 +900,47 @@ class Node:
         ev.bref = bref
         if kind == "glyph":
             self.fresh["push"].append(ev)
+            if is_shared(ev.key):
+                self.shared_n[a] = self.shared_n.get(a, 0) + 1
             if is_shared(ev.key) and a != self.me:
                 self.on_shared_glyph(ev, now_ms)
         else:
             self.fresh["svc"].append(ev)
         return ev
+
+    def accept_tombstone(self, env, a, now_ms):
+        body = env["body"]
+        tgt = body.get("target") if isinstance(body, dict) else None
+        if (not self.anis or not isinstance(tgt, int) or not 0 <= tgt < self.n
+                or body.get("node") != a):
+            self.reject("tombstone_schema")
+            return None
+        ev = Ev(env["id"], "tombstone", a, body, now_ms, env)
+        self.events[ev.eid] = ev
+        self.tomb_events.append(ev)
+        self.fresh["all"].append(ev)            # ретрансляция, как key_event
+        if self.tombs.foreign(a, tgt, now_ms):
+            self.on_buried(tgt)
+        return ev
+
+    def bury(self, src, v, s_val, gap, pos):
+        """Моё APSA сказало INTENTIONAL: двухфазно (или сразу) - надгробие."""
+        if self.tombs.intentional(src, v, pos, gap, self.clock):
+            self.on_buried(v)
+            body = {"target": v, "s": int(round(s_val * 1000)), "src": src,
+                    "hlc": self.hlc.now(self.clock), "node": self.me}
+            env = make_env(self.k, "tombstone", body)
+            ev = Ev(env["id"], "tombstone", self.me, body, self.clock, env)
+            self.events[ev.eid] = ev
+            self.tomb_events.append(ev)
+            self.fresh["all"].append(ev)
+
+    def on_buried(self, v):
+        """Надгробие в силе: голоса похороненного не учитываются, его события
+        не принимаются (как штраф v1.1), новые пакеты от него - отказ на входе."""
+        if v not in self.slashed:
+            self.slashed[v] = self.clock
+            self.recompute_trust()
 
     def accept_key_event(self, env, a, now_ms):
         body = env["body"]
@@ -715,10 +976,20 @@ class Node:
             if "T3" in self.attacks:
                 self.replay_pool.append(ev)
             return
+        if self.anis and self.kin_gate and ev.key.endswith(".pos"):
+            self.kinematic_check(ev, now_ms)
+        if self.anis and self.liar_vote:
+            q = self.lie_hist.setdefault(ev.author, deque(maxlen=200))
+            q.append(ev.eid)
+            self.kin_n[ev.author] = self.kin_n.get(ev.author, 0) + 1
         # Подтверждаем только то, что в карантине (иначе трафик удвоится),
         # опровергаем всегда: ложь, уже вошедшую в картину, надо выбить.
         if self.sensor.covers(ev.key, now_ms):
             ok = self.sensor.check(ev.key, ev.value, ev.hlc[0], now_ms)
+            if ok:
+                self.true_seq += 1
+                if self.anis:
+                    self.apsa.saw_true(now_ms)
             if ok and not self.admitted(ev.eid):
                 self.emit_validation(ev, "confirmed", now_ms)
             elif not ok:
@@ -727,6 +998,37 @@ class Node:
             self.fp_records.append((ev.eid[7:23], ev.author, now_ms, 0))
         else:
             self.fp_pending[ev.eid] = now_ms
+
+    def liar_check(self, a):
+        """Доля событий автора, опровергнутых кворумом, в окне его 200 общих."""
+        q = self.lie_hist.get(a)
+        if not q or len(q) < 10:
+            return
+        bad = self.lie_bad.get(a, set())
+        nb = sum(1 for e in q if e in bad)
+        if nb >= 5 and nb >= 0.25 * len(q):
+            self.bury("lie", a, nb / len(q), self.tomb_gap // 2, self.kin_n.get(a, 0))
+
+    def kinematic_check(self, ev, now_ms):
+        """T4: скачок координаты цели против прежнего победителя слота."""
+        prev = None
+        for _, eid, value in reversed(self.table.slots.get(ev.key, ())):
+            if eid != ev.eid and self.admitted(eid):
+                prev = value
+                break
+        if prev is None:
+            return
+        try:
+            jump = max(abs(ev.value[0] - prev[0]),
+                       abs(ev.value[1] - prev[1])) > self.kin_gate
+        except (TypeError, IndexError):
+            return
+        a = ev.author
+        self.kin_n[a] = self.kin_n.get(a, 0) + 1
+        self.apsa.kinematic(a, jump, now_ms)
+        st, sv, _, _ = self.apsa.verdict(a, now_ms, "aut")
+        if st == INTENTIONAL:
+            self.bury("aut", a, sv, 10, self.kin_n[a])
 
     def emit_validation(self, ev, verdict, now_ms, label=None):
         body = {"glyph_hash": ev.eid, "verdict": verdict,
@@ -985,7 +1287,7 @@ class Node:
             if e.eid in seen:
                 continue
             seen.add(e.eid)
-            if e.kind == "key_event":
+            if e.kind in ("key_event", "tombstone"):
                 out.append((wire.enc_json(canon(e.env)), 1))
             elif e.bref is not None:
                 groups.setdefault(e.bref[0], []).append(e.bref[1])
@@ -1123,7 +1425,7 @@ class Node:
         return self.answer_body(env["body"])
 
     def answer_body(self, body):
-        out = []
+        out = list(self.tomb_events)
         for ke in self.key_events:
             if self.idx_of[ke.env["body"]["key"]] not in body.get("rev", []):
                 out.append(ke)
@@ -1134,6 +1436,11 @@ class Node:
                 if mine and mine[7:13] != sl[6 * ki:6 * ki + 6]:
                     out.append(self.events[mine])
         vv = body.get("vv", {})
+        cap = PULL_CAP
+        if self.pull_quiet_cap and self.clock >= self.events_until:
+            cap = self.pull_quiet_cap
+        if self.pull_priority == "validations":
+            return self._answer_votes_first(vv, out, cap)
         for a in range(self.n):
             c, bm = vv.get(str(a), [0, "0"])
             try:
@@ -1142,14 +1449,45 @@ class Node:
                 bits = 0
             held = self.held[a]
             i = bisect_right(held, c)
-            while i < len(held) and len(out) < PULL_CAP:
+            while i < len(held) and len(out) < cap:
                 s = held[i]
                 i += 1
                 if s - c <= BITMAP and bits >> (s - c - 1) & 1:
                     continue
                 out.append(self.events[self.by_seq[(a, s)]])
-            if len(out) >= PULL_CAP:
+            if len(out) >= cap:
                 break
+        return out
+
+    def _answer_votes_first(self, vv, out, cap):
+        """D1: точно недостающие голоса всех авторов, затем точно недостающие
+        события, и только потом записи за окном digest (там могут быть дубли)."""
+        sure_v, sure_g, beyond = [], [], []
+        for a in range(self.n):
+            c, bm = vv.get(str(a), [0, "0"])
+            try:
+                bits = int(bm, 16)
+            except (TypeError, ValueError):
+                bits = 0
+            held = self.held[a]
+            for s in held[bisect_right(held, c):]:
+                if s - c > BITMAP:       # дальше окна: held отсортирован
+                    if len(beyond) >= cap:
+                        break
+                    beyond.append((a, s))
+                    continue
+                if bits >> (s - c - 1) & 1:
+                    continue
+                ev = self.events[self.by_seq[(a, s)]]
+                (sure_v if ev.kind == "validation" else sure_g).append(ev)
+        for ev in sure_v + sure_g:
+            if len(out) >= cap:
+                return out
+            out.append(ev)
+        for a, s in beyond:
+            if len(out) >= cap:
+                break
+            out.append(self.events[self.by_seq[(a, s)]])
         return out
 
     # ---------------------------------------------------------- картина
@@ -1358,6 +1696,7 @@ def run_node(cfg, idx, barrier, counts, q):
                             link.send(dst, "svc", p, t, now, p.count(b'"gep"'))
                     node.fresh["all"] = []
             # 5. картина, карантин, доверие
+            node.flush_votes()
             node.record_picture(t)
             if t % 5 == 4:
                 node.check_pending(now)
@@ -1407,5 +1746,21 @@ def run_node(cfg, idx, barrier, counts, q):
         "drift": node.hlc.drift,
         "slashed": {str(v): ms for v, ms in node.slashed.items()},
         "batches_made": node.batches_made,
+        "sensor_flips": node.sensor.flips,
+        "strikes": {str(v): k for v, k in node.strike_n.items()},
+        "applied": node.applied,
+        "rebuttals": node.rebuttals,
+        "replays": node.replays,
+        "thymus_blocked": node.tombs.blocked if node.anis else 0,
+        "tombs": [[e.author, e.env["body"]["target"], e.env["body"].get("src"), e.env["body"].get("s"), e.arrival]
+                  for e in node.tomb_events if e.author == idx],
+        # v1.4: журнал к концу прогона - сколько записей каждого автора у меня есть
+        # и последний свой seq (для подсчёта недоставленного)
+        "held_n": [len(h) for h in node.held], "own_seq": node.seq,
+        # v1.4 шаг 0: по каждому общему событию - отпечаток множеств голосов и решение
+        "vstate": {e.eid[7:23]: [hashlib.sha256(repr((
+            sorted(node.vset.get(e.eid, ((), ()))[0]),
+            sorted(node.vset.get(e.eid, ((), ()))[1]))).encode()).hexdigest()[:8],
+            node.admitted(e.eid), e.author] for e in glyphs if is_shared(e.key)},
     }
     q.put(res)
