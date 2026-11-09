@@ -665,3 +665,52 @@ def test_v13_liar_needs_a_share_not_a_count():
         ju.refuted_q[0] = {"a", "b", "c"}
         ju.shared_n[0] = shared_n
         assert ju.admitted(e.eid) is want
+
+
+# v1.4 ---------------------------------------------------------------------
+
+def _votes_on(e, truth, plan):
+    """plan: [(idx, verdict, t)] -> подписанные оценки разных узлов."""
+    out = []
+    for idx, verdict, t in plan:
+        node = mk_node(idx, n=5, trust=0.5, truth=truth)
+        node.accept(e.env, t - 50)
+        node.emit_validation(e, verdict, t)
+        out.append(node.fresh["svc"][-1].env)
+    return out
+
+
+def test_v14_canonical_vote_order_gives_one_answer_for_one_set():
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    au = mk_node(0, n=5, trust=0.5, truth=truth)
+    e = au.gen_own(1000, "sector_1.status", "hazard", None)
+    votes = _votes_on(e, truth, [(1, "refuted", 1200), (2, "confirmed", 1300),
+                                 (3, "refuted", 1400)])
+    got = set()
+    for order in ((0, 1, 2), (2, 0, 1), (1, 2, 0)):
+        ju = mk_node(4, n=5, trust=0.5, truth=truth, vote_order="canonical",
+                     refute_quorum=2)
+        ju.sensor.covers = lambda k, now: False
+        ju.accept(e.env, 1500)
+        for i in order:
+            ju.accept(votes[i], 1600)
+        ju.flush_votes()
+        got.add((tuple(ju.trust), round(ju.vsum.get(e.eid, 0.0), 9), ju.admitted(e.eid)))
+    assert len(got) == 1
+
+
+def test_v14_sensor_filter_off_counts_refutation_my_sensor_disputes():
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    au = mk_node(0, n=5, trust=1.0, truth=truth)
+    e = au.gen_own(1000, "sector_1.status",
+                   sn.truth_at(truth, "sector_1.status", 1000), None)
+    votes = _votes_on(e, truth, [(1, "refuted", 1200), (2, "refuted", 1300)])
+    for flt, want in ((True, True), (False, False)):
+        ju = mk_node(4, n=5, trust=1.0, truth=truth, slash=True, slash_window=3,
+                     refute_quorum=2, sensor_filter=flt)
+        ju.sensor.covers = lambda k, now: True      # мой датчик: значение верное
+        ju.accept(e.env, 1500)
+        for v in votes:
+            ju.accept(v, 1600)
+        assert ju.admitted(e.eid) is want           # off: кворум опровержений действует
+        assert not ju.slashed

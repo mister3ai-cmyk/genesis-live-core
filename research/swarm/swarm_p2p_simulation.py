@@ -50,7 +50,10 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 refute_quorum=2,       # v1.3: опровержение действует от N узлов
                 confirm_quorum=1,      # v1.3: подтверждение действует от N узлов
                 quorum_scope="all", confirm_cap=None, refute_cap=None,
-                rebut=False, admit_rule="trust", liar_k=0)
+                rebut=False, admit_rule="trust", liar_k=0,
+                vote_order="arrival", sensor_filter=True,   # v1.4
+                self_trust="full", pull_priority="log", pull_quiet_cap=0,
+                self_admit="always")
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -159,7 +162,10 @@ def run_once(cfg):
                 confirm_quorum=cfg["confirm_quorum"],
                 quorum_scope=cfg["quorum_scope"], confirm_cap=cfg["confirm_cap"],
                 refute_cap=cfg["refute_cap"], rebut=cfg["rebut"],
-                admit_rule=cfg["admit_rule"], liar_k=cfg["liar_k"])
+                admit_rule=cfg["admit_rule"], liar_k=cfg["liar_k"],
+                vote_order=cfg["vote_order"], sensor_filter=cfg["sensor_filter"],
+                self_trust=cfg["self_trust"], pull_priority=cfg["pull_priority"],
+                pull_quiet_cap=cfg["pull_quiet_cap"], self_admit=cfg["self_admit"])
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -216,6 +222,18 @@ def run_once(cfg):
         rec["admit_rule"] = cfg["admit_rule"]
     if cfg["liar_k"]:
         rec["liar_k"] = cfg["liar_k"]
+    if cfg["vote_order"] != "arrival":
+        rec["vote_order"] = cfg["vote_order"]
+    if not cfg["sensor_filter"]:
+        rec["sensor_filter"] = False
+    if cfg["self_trust"] != "full":
+        rec["self_trust"] = cfg["self_trust"]
+    if cfg["pull_priority"] != "log":
+        rec["pull_priority"] = cfg["pull_priority"]
+    if cfg["pull_quiet_cap"]:
+        rec["pull_quiet_cap"] = cfg["pull_quiet_cap"]
+    if cfg["self_admit"] != "always":
+        rec["self_admit"] = cfg["self_admit"]
     rec["metrics"] = m
     return rec, results
 
@@ -437,6 +455,38 @@ def compute_metrics(cfg, world, results):
     m["slashed_honest"] = sum(1 for (_, v, _) in sl if v in honest)
     m["slashed_attacker_by"] = sum(1 for (_, v, _) in sl if v not in honest)
     m["sensor_flips"] = sum(results[i].get("sensor_flips", 0) for i in honest)
+    # v1.4 шаг 0: совпадают ли множества голосов и решения о приёме у честных
+    vs = [results[i].get("vstate") for i in honest]
+    if all(v is not None for v in vs):
+        common = set(vs[0])
+        for v in vs[1:]:
+            common |= set(v)
+        same = diff = dis_same = dis_diff = 0
+        for e in common:
+            # сравниваем узлы, кроме автора (автор принимает своё всегда);
+            # событие считаем, только если оно есть у всех остальных честных
+            au = next(v[e][2] for v in vs if e in v)
+            have = [v for i, v in zip(honest, vs) if i != au]
+            if not all(e in v for v in have):
+                continue
+            digs = {v[e][0] for v in have}
+            adm = {v[e][1] for v in have}
+            if len(digs) == 1:
+                same += 1
+                dis_same += len(adm) > 1
+            else:
+                diff += 1
+                dis_diff += len(adm) > 1
+        m["vset_equal_frac"] = _r(same / max(same + diff, 1))
+        m["admit_disagree_same_set"] = dis_same
+        m["admit_disagree_diff_set"] = dis_diff
+    m["replays"] = sum(results[i].get("replays", 0) for i in honest)
+    # v1.4: недоставленные записи журнала честных авторов к концу прогона
+    if all("held_n" in results[i] for i in honest):
+        gaps = [results[j]["own_seq"] - results[i]["held_n"][j]
+                for i in honest for j in honest if i != j]
+        m["journal_gap_sum"] = sum(gaps)
+        m["journal_gap_max"] = max(gaps) if gaps else 0
     m["strikes_on_honest"] = sum(k for i in honest for v, k in results[i].get("strikes", {}).items()
                                  if int(v) in honest)
     if attacked:
@@ -596,6 +646,16 @@ def grid(which):
                         for s in seeds:
                             cfgs.append(dict(branch=branch, topology=topo,
                                              loss=loss, partition=part, seed=s))
+    if which == "probe14":
+        # v1.4: probe13 + худшие по сходимости конфигурации v1.3 (шум 3 %)
+        for att in ("none", "T4", "T7"):
+            for s in range(1, 6):
+                cfgs.append(dict(branch="B", loss=0.05, attack=att, seed=s))
+        for topo, loss, part in (("chain", 0.4, "isolate"), ("full", 0.2, "isolate"),
+                                 ("chain", 0.2, "none"), ("full", 0.4, "none")):
+            for s in range(1, 6):
+                cfgs.append(dict(branch="B", topology=topo, loss=loss,
+                                 partition=part, seed=s))
     if which == "probe13":
         # разведка v1.3: без атаки, T4, T7 x 5 зёрен + цепочка 40 % isolate x 5
         for att in ("none", "T4", "T7"):
@@ -664,6 +724,18 @@ def run_grid(cfgs, out, workers, extra):
                 rec["admit_rule"] = dict(DEFAULTS, **c)["admit_rule"]
             if dict(DEFAULTS, **c)["liar_k"]:
                 rec["liar_k"] = dict(DEFAULTS, **c)["liar_k"]
+            if dict(DEFAULTS, **c)["vote_order"] != "arrival":
+                rec["vote_order"] = dict(DEFAULTS, **c)["vote_order"]
+            if not dict(DEFAULTS, **c)["sensor_filter"]:
+                rec["sensor_filter"] = False
+            if dict(DEFAULTS, **c)["self_trust"] != "full":
+                rec["self_trust"] = dict(DEFAULTS, **c)["self_trust"]
+            if dict(DEFAULTS, **c)["pull_priority"] != "log":
+                rec["pull_priority"] = dict(DEFAULTS, **c)["pull_priority"]
+            if dict(DEFAULTS, **c)["pull_quiet_cap"]:
+                rec["pull_quiet_cap"] = dict(DEFAULTS, **c)["pull_quiet_cap"]
+            if dict(DEFAULTS, **c)["self_admit"] != "always":
+                rec["self_admit"] = dict(DEFAULTS, **c)["self_admit"]
             for q in ("confirm_cap", "refute_cap", "rebut"):
                 if dict(DEFAULTS, **c)[q]:
                     rec[q] = dict(DEFAULTS, **c)[q]
@@ -699,7 +771,13 @@ def _cfg_key(r):
                                                   r.get("refute_cap"),
                                                   r.get("rebut", False),
                                                   r.get("admit_rule", "trust"),
-                                                  r.get("liar_k", 0))
+                                                  r.get("liar_k", 0),
+                                                  r.get("vote_order", "arrival"),
+                                                  r.get("sensor_filter", True),
+                                                  r.get("self_trust", "full"),
+                                                  r.get("pull_priority", "log"),
+                                                  r.get("pull_quiet_cap", 0),
+                                                  r.get("self_admit", "always"))
 
 
 # ------------------------------------------------------------------- отчёт
@@ -1000,7 +1078,8 @@ def main():
     ap.add_argument("--nodes", type=int, default=5)
     ap.add_argument("--tick-ms", type=int, default=TICK_MS)
     ap.add_argument("--K", type=int, default=10)
-    ap.add_argument("--grid", choices=("all", "conv", "attacks", "sens", "check12", "probe13"))
+    ap.add_argument("--grid", choices=("all", "conv", "attacks", "sens", "check12", "probe13",
+                                       "probe14"))
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--out", default=os.path.join(HERE, "results.jsonl"))
     ap.add_argument("--report")
@@ -1036,6 +1115,18 @@ def main():
                     help="v1.3: правило приёма - доверие Q2 или функция от множеств оценщиков")
     ap.add_argument("--liar-k", type=int, default=0,
                     help="v1.3: автор с K событиями, опровергнутыми >=2 узлами, теряет вес (0 = выкл)")
+    ap.add_argument("--vote-order", default="arrival", choices=("arrival", "canonical"),
+                    help="v1.4: применять голоса в порядке прихода или в каноничном (HLC, id)")
+    ap.add_argument("--sensor-filter", default="on", choices=("on", "off"),
+                    help="v1.4: off - собственный датчик судьи не фильтрует опровержения при приёме")
+    ap.add_argument("--self-trust", default="full", choices=("full", "symmetric"),
+                    help="v1.4: доверие к себе 1.0 (full) или считается как к другим (symmetric)")
+    ap.add_argument("--pull-priority", default="log", choices=("log", "validations"),
+                    help="v1.4: PULL по порядку журнала (log) или сначала недостающие голоса")
+    ap.add_argument("--pull-quiet-cap", type=int, default=0,
+                    help="v1.4: записей в ответе PULL, когда своих событий уже нет (0 = как всегда, 24)")
+    ap.add_argument("--self-admit", default="always", choices=("always", "rule"),
+                    help="v1.4: своё событие по общему ключу - принимать всегда или по общему правилу")
     ap.add_argument("--rebut", action="store_true",
                     help="v1.3: отвечать подтверждением на опровержение того, что мой сенсор видит верным")
     ap.add_argument("--no-slot-digest", action="store_true",
@@ -1066,6 +1157,12 @@ def main():
     extra["rebut"] = a.rebut
     extra["admit_rule"] = a.admit_rule
     extra["liar_k"] = a.liar_k
+    extra["vote_order"] = a.vote_order
+    extra["sensor_filter"] = a.sensor_filter == "on"
+    extra["self_trust"] = a.self_trust
+    extra["pull_priority"] = a.pull_priority
+    extra["pull_quiet_cap"] = a.pull_quiet_cap
+    extra["self_admit"] = a.self_admit
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return

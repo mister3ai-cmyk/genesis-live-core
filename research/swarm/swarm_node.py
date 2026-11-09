@@ -429,7 +429,11 @@ class Node:
         self.by_seq = {}
         self.seq = 0
         self.trust = [float(cfg["trust_init"])] * self.n
-        self.trust[idx] = 1.0
+        # v1.4 P3: "symmetric" - доверие к себе считается так же, как к другим,
+        # иначе одна и та же оценка весит у её автора больше, чем у остальных
+        self.self_trust = cfg.get("self_trust", "full")
+        if self.self_trust == "full":
+            self.trust[idx] = 1.0
         self.vsum = {}
         self.vseen = set()
         self.vpending = {}
@@ -493,6 +497,22 @@ class Node:
         # "log-odds": C - R >= 0; "sensor-veto": R < 2 и я сам не опроверг
         self.admit_rule = cfg.get("admit_rule", "trust")
         self.vset = {}              # eid -> (подтвердившие, опровергшие)
+        # v1.4: P1 - голоса применяются в каноничном порядке (HLC, id оценки),
+        # а не в порядке прихода; P2 - собственный датчик судьи не фильтрует
+        # опровержения при приёме, только бьёт по окну штрафа
+        self.vorder = cfg.get("vote_order", "arrival")
+        self.sensor_filter = cfg.get("sensor_filter", True)
+        self.vsorted = []           # canonical: [(ключ, запись)] по ключу
+        self.vdirty = False
+        self.vflush_clock = None
+        self.replays = 0
+        # v1.4 доставка: D1 "validations" - из недостающего сначала голоса;
+        # D2 - сколько записей в ответе PULL, когда своих событий уже нет
+        # P4: "rule" - по общим ключам своё событие судится по тому же правилу,
+        # что и чужое (иначе при шуме автор держит то, что остальные отвергли)
+        self.self_admit = cfg.get("self_admit", "always")
+        self.pull_priority = cfg.get("pull_priority", "log")
+        self.pull_quiet_cap = int(cfg.get("pull_quiet_cap", 0) or 0)
         # история автора как множество: его события, опровергнутые >= 2 узлами;
         # от LIAR_K таких событий автор теряет вес (тоже без зависимости от порядка)
         self.liar_k = int(cfg.get("liar_k", 0) or 0)
@@ -528,8 +548,11 @@ class Node:
         r = self.revoked.get(a)
         if r is not None and ev.hlc[0] >= r[0]:
             return False
-        if owner_of(ev.key) is not None or a == self.me:
+        if owner_of(ev.key) is not None or (a == self.me and self.self_admit == "always"):
             return True                 # правило владельца: хватает подписи
+        if self.vdirty and self.vflush_clock != self.clock:
+            self.vflush_clock = self.clock      # не чаще раза на момент времени
+            self.flush_votes()
         rule = self.admit_rule
         if rule != "trust":
             cs, rs = self.vset.get(eid, ((), ()))
@@ -591,12 +614,29 @@ class Node:
                 # ушло в карантин - отвечаю подтверждением, один раз
                 self.rebuttals += 1
                 self.emit_validation(target, "confirmed", self.clock)
-            return      # v1.3: ниже порога опровержение просто не учитывается
+            if self.sensor_filter or v in self.slashed:
+                return  # v1.3: ниже порога опровержение просто не учитывается
         ev_in = (body.get("evidence") or {}).get("applied_in")
         bonus = self.EVIDENCE if ev_in else 1.0
         rec = (v, target.eid, subj, verdict, bonus)
+        if self.vorder == "canonical":
+            key = (vev.hlc[0], vev.hlc[1], vev.eid)
+            if not self.vsorted or key > self.vsorted[-1][0]:
+                self.vsorted.append((key, rec))
+                self._feed(rec)          # пришёл по порядку - как полный пересчёт
+            else:
+                insort(self.vsorted, (key, rec))
+                self.vdirty = True       # не по порядку - пересчёт в начале такта
+            return
         self.vlog.append(rec)
         self._feed(rec)
+
+    def flush_votes(self):
+        """v1.4 canonical: если голос пришёл не по порядку, пересчитать всё
+        в каноничном порядке; итог зависит только от множества голосов."""
+        if self.vdirty:
+            self.vdirty = False
+            self.recompute_trust()
 
     def _feed(self, rec):
         q = self.quorum if rec[3] == "refuted" else self.cquorum
@@ -643,18 +683,26 @@ class Node:
             d = self.REFUTE * w
         if part == "weight":
             return
-        if subj != self.me and subj not in self.slashed:
+        if (subj != self.me or self.self_trust != "full") and subj not in self.slashed:
             self.trust[subj] = min(1.0, max(0.0, self.trust[subj] + d))
 
     def recompute_trust(self):
         """Доверие и веса так, будто оштрафованные обвинители не говорили
         ничего: тот же порядок validation, те же правила, без их голосов."""
         self.trust = [float(self.cfg["trust_init"])] * self.n
-        self.trust[self.me] = 1.0
+        if self.self_trust == "full":
+            self.trust[self.me] = 1.0
         for s in self.slashed:
             self.trust[s] = 0.0
         self.vsum = {}
         self.rwait = {}
+        if self.vorder == "canonical":
+            self.replays += 1
+            self.vdirty = False
+            self.vsorted = [kr for kr in self.vsorted if kr[1][0] not in self.slashed]
+            for _, rec in self.vsorted:
+                self._feed(rec)
+            return
         keep = []
         for rec in self.vlog:
             if rec[0] in self.slashed:
@@ -1261,6 +1309,11 @@ class Node:
                 if mine and mine[7:13] != sl[6 * ki:6 * ki + 6]:
                     out.append(self.events[mine])
         vv = body.get("vv", {})
+        cap = PULL_CAP
+        if self.pull_quiet_cap and self.clock >= self.events_until:
+            cap = self.pull_quiet_cap
+        if self.pull_priority == "validations":
+            return self._answer_votes_first(vv, out, cap)
         for a in range(self.n):
             c, bm = vv.get(str(a), [0, "0"])
             try:
@@ -1269,14 +1322,45 @@ class Node:
                 bits = 0
             held = self.held[a]
             i = bisect_right(held, c)
-            while i < len(held) and len(out) < PULL_CAP:
+            while i < len(held) and len(out) < cap:
                 s = held[i]
                 i += 1
                 if s - c <= BITMAP and bits >> (s - c - 1) & 1:
                     continue
                 out.append(self.events[self.by_seq[(a, s)]])
-            if len(out) >= PULL_CAP:
+            if len(out) >= cap:
                 break
+        return out
+
+    def _answer_votes_first(self, vv, out, cap):
+        """D1: точно недостающие голоса всех авторов, затем точно недостающие
+        события, и только потом записи за окном digest (там могут быть дубли)."""
+        sure_v, sure_g, beyond = [], [], []
+        for a in range(self.n):
+            c, bm = vv.get(str(a), [0, "0"])
+            try:
+                bits = int(bm, 16)
+            except (TypeError, ValueError):
+                bits = 0
+            held = self.held[a]
+            for s in held[bisect_right(held, c):]:
+                if s - c > BITMAP:       # дальше окна: held отсортирован
+                    if len(beyond) >= cap:
+                        break
+                    beyond.append((a, s))
+                    continue
+                if bits >> (s - c - 1) & 1:
+                    continue
+                ev = self.events[self.by_seq[(a, s)]]
+                (sure_v if ev.kind == "validation" else sure_g).append(ev)
+        for ev in sure_v + sure_g:
+            if len(out) >= cap:
+                return out
+            out.append(ev)
+        for a, s in beyond:
+            if len(out) >= cap:
+                break
+            out.append(self.events[self.by_seq[(a, s)]])
         return out
 
     # ---------------------------------------------------------- картина
@@ -1485,6 +1569,7 @@ def run_node(cfg, idx, barrier, counts, q):
                             link.send(dst, "svc", p, t, now, p.count(b'"gep"'))
                     node.fresh["all"] = []
             # 5. картина, карантин, доверие
+            node.flush_votes()
             node.record_picture(t)
             if t % 5 == 4:
                 node.check_pending(now)
@@ -1538,5 +1623,14 @@ def run_node(cfg, idx, barrier, counts, q):
         "strikes": {str(v): k for v, k in node.strike_n.items()},
         "applied": node.applied,
         "rebuttals": node.rebuttals,
+        "replays": node.replays,
+        # v1.4: журнал к концу прогона - сколько записей каждого автора у меня есть
+        # и последний свой seq (для подсчёта недоставленного)
+        "held_n": [len(h) for h in node.held], "own_seq": node.seq,
+        # v1.4 шаг 0: по каждому общему событию - отпечаток множеств голосов и решение
+        "vstate": {e.eid[7:23]: [hashlib.sha256(repr((
+            sorted(node.vset.get(e.eid, ((), ()))[0]),
+            sorted(node.vset.get(e.eid, ((), ()))[1]))).encode()).hexdigest()[:8],
+            node.admitted(e.eid), e.author] for e in glyphs if is_shared(e.key)},
     }
     q.put(res)
