@@ -55,7 +55,9 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 self_trust="full", pull_priority="log", pull_quiet_cap=0,
                 self_admit="always", arbiter="scalar", kinematic_gate=0,   # v2.0
                 apsa_rule=None, tomb_gap=20, liar_vote=False, liar_win=50, liar_gap=2, apsa_window="event",   # v2.1
-                fast_refute=0)                                 # v2.2
+                fast_refute=0,                                 # v2.2
+                sensor_model="flip", marzullo=0, status_prior=False,
+                slot_votes=False)   # v3
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -142,6 +144,16 @@ def build_world(seed, n, events_until_ms, tick_ms=TICK_MS):
 
 # ------------------------------------------------------------------- прогон
 
+def _v3_defaults(arbiter, sensor_model=None, marzullo=None, slot_votes=None):
+    """v3.0: у арбитра anis по умолчанию интервальный датчик и Марзулло f=1;
+    v3.1: и досылка голосов по спорным слотам. У скалярного - как до v3.
+    Явно заданные значения не трогаются."""
+    anis = arbiter.startswith("anis")
+    return (sensor_model or ("interval" if anis else "flip"),
+            (1 if anis else 0) if marzullo is None else marzullo,
+            anis if slot_votes is None else slot_votes)
+
+
 def run_once(cfg):
     cfg = dict(DEFAULTS, **cfg)
     n = cfg["n"]
@@ -172,7 +184,9 @@ def run_once(cfg):
                 apsa_rule=cfg["apsa_rule"], tomb_gap=cfg["tomb_gap"],
                 liar_vote=cfg["liar_vote"], liar_win=cfg["liar_win"],
                 liar_gap=cfg["liar_gap"], apsa_window=cfg["apsa_window"],
-                fast_refute=cfg["fast_refute"])
+                fast_refute=cfg["fast_refute"],
+                sensor_model=cfg["sensor_model"], marzullo=cfg["marzullo"],
+                status_prior=cfg["status_prior"], slot_votes=cfg["slot_votes"])
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -257,6 +271,9 @@ def run_once(cfg):
         rec["apsa_window"] = cfg["apsa_window"]
     if cfg["fast_refute"]:
         rec["fast_refute"] = cfg["fast_refute"]
+    for k in ("sensor_model", "marzullo", "status_prior", "slot_votes"):
+        if cfg[k] != DEFAULTS[k]:
+            rec[k] = cfg[k]
     if cfg["arbiter"] != "scalar":
         rec["tomb_gap"] = cfg["tomb_gap"]
     rec["metrics"] = m
@@ -488,6 +505,24 @@ def compute_metrics(cfg, world, results):
     m["sensor_flips"] = sum(results[i].get("sensor_flips", 0) for i in honest)
     m["thymus_blocked"] = sum(results[i].get("thymus_blocked", 0) for i in honest)
     m["fast_sent"] = sum(results[i].get("fast_sent", 0) for i in range(n))
+    # v3: шумовые опровержения честных и подавленные своим Марзулло
+    m["false_ref_pos"] = sum(results[i].get("false_ref", {}).get("pos", 0) for i in honest)
+    m["false_ref_status"] = sum(results[i].get("false_ref", {}).get("status", 0) for i in honest)
+    m["mz_suppressed"] = sum(results[i].get("mz_suppressed", 0) for i in honest)
+    # v3: задержка приёма честной смены истины (первое сообщение о новом
+    # значении, тег ("C", pid, "new")) у остальных честных узлов, мс
+    tagged = {eid: (key, author) for eid, (key, vh, l, c, author, gen, label, tag)
+              in labels.items() if label == "H" and author in honest
+              and isinstance(tag, (list, tuple)) and len(tag) == 3 and tag[2] == "new"}
+    for kind in ("status", "pos"):
+        waits = [w for i in honest for (eid, author, arr, w) in results[i]["fp_records"]
+                 if eid in tagged and tagged[eid][0].endswith("." + kind)]
+        ok = sorted(w for w in waits if w >= 0)
+        m["change_admit_ms_" + kind] = {
+            "n": len(waits), "never": len(waits) - len(ok),
+            "p50": ok[len(ok) // 2] if ok else None,
+            "p95": ok[min(len(ok) - 1, int(0.95 * len(ok)))] if ok else None,
+            "max": ok[-1] if ok else None}
     # v1.4 шаг 0: совпадают ли множества голосов и решения о приёме у честных
     vs = [results[i].get("vstate") for i in honest]
     if all(v is not None for v in vs):
@@ -602,6 +637,9 @@ def attack_metrics(cfg, results, honest, keys, kidx, tick):
             end_tk = cfg["duration_s"] * 1000 // tick
             half = len(honest) / 2
             ttes = []
+            kind_of = {eid: ("pos" if key.endswith(".pos") else "status")
+                       for (eid, key, vh, t) in items}
+            by_kind = {"status": [], "pos": []}
             for eid, d in delta.items():
                 cnt, prev, maj = 0, None, 0
                 for tk in sorted(d):
@@ -613,6 +651,12 @@ def attack_metrics(cfg, results, honest, keys, kidx, tick):
                     maj += end_tk - prev
                 if maj:
                     ttes.append(maj * tick / 1000)
+                    by_kind[kind_of.get(eid, "pos")].append(maj * tick / 1000)
+            # v3: отдельно по статусам и координатам
+            for k, xs in by_kind.items():
+                r["lies_in_majority_" + k] = len(xs)
+                r["tte_max_s_" + k] = _r(max(xs), 2) if xs else 0.0
+                r["sent_" + k] = sum(1 for e in items if kind_of[e[0]] == k)
             r["lies_in_majority"] = len(ttes)
             r["tte_max_s"] = _r(max(ttes), 2) if ttes else 0.0
             r["tte_over_1_5s"] = sum(1 for x in ttes if x > 1.5)
@@ -785,6 +829,9 @@ def run_grid(cfgs, out, workers, extra):
                 rec["apsa_window"] = dict(DEFAULTS, **c)["apsa_window"]
             if dict(DEFAULTS, **c)["fast_refute"]:
                 rec["fast_refute"] = dict(DEFAULTS, **c)["fast_refute"]
+            for k in ("sensor_model", "marzullo", "status_prior", "slot_votes"):
+                if dict(DEFAULTS, **c)[k] != DEFAULTS[k]:
+                    rec[k] = dict(DEFAULTS, **c)[k]
             if dict(DEFAULTS, **c)["arbiter"] != "scalar":
                 rec["tomb_gap"] = dict(DEFAULTS, **c)["tomb_gap"]
             for q in ("confirm_cap", "refute_cap", "rebut"):
@@ -837,7 +884,11 @@ def _cfg_key(r):
                                                   r.get("liar_win", 200),
                                                   r.get("liar_gap"),
                                                   r.get("apsa_window", "arrival"),
-                                                  r.get("fast_refute", 0))
+                                                  r.get("fast_refute", 0),
+                                                  r.get("sensor_model", "flip"),
+                                                  r.get("marzullo", 0),
+                                                  r.get("status_prior", False),
+                                                  r.get("slot_votes", False))
 
 
 # ------------------------------------------------------------------- отчёт
@@ -1205,6 +1256,21 @@ def main():
                     help="v2.0: пауза второй фазы для лжеца, в его событиях (по умолчанию tomb-gap // 2)")
     ap.add_argument("--apsa-window", default="event", choices=("arrival", "event"),
                     help="v2.1: окно обвинителя по времени прихода ударов (v2.0) или по самим событиям")
+    ap.add_argument("--sensor-model", default=None, choices=("flip", "interval"),
+                    help="v3: сбой датчика переворачивает вердикт (v1.3) или сдвигает измерение; "
+                         "по умолчанию interval при --arbiter anis*, иначе flip")
+    ap.add_argument("--marzullo", type=int, default=None,
+                    help="v3: приём координат по Марзулло с допуском f сбойных (0 = выкл); "
+                         "по умолчанию 1 при --arbiter anis*, иначе 0")
+    ap.add_argument("--status-prior", action="store_true",
+                    help="v3, ОТВЕРГНУТ: статус против согласия >= 2 других авторов ждёт подтверждения. "
+                         "565 непринятых смен статуса на связной сети, FP x9 (SWARM_FINDINGS, Часть VIII); "
+                         "оставлен только для воспроизведения этих чисел")
+    ap.add_argument("--slot-votes", dest="slot_votes", action="store_true", default=None,
+                    help="v3.1: при расхождении победителя слота досылать голоса по спорным событиям ключа; "
+                         "по умолчанию включено при --arbiter anis*")
+    ap.add_argument("--no-slot-votes", dest="slot_votes", action="store_false",
+                    help="v3.1: выключить досылку голосов (воспроизведение v3.0)")
     ap.add_argument("--fast-refute", type=int, default=0,
                     help="v2.2: быстрая полоса - до N опровержений за 500 мс сразу отдельным пакетом (0 = выкл)")
     ap.add_argument("--rebut", action="store_true",
@@ -1252,6 +1318,9 @@ def main():
     extra["liar_gap"] = a.liar_gap
     extra["apsa_window"] = a.apsa_window
     extra["fast_refute"] = a.fast_refute
+    extra["sensor_model"], extra["marzullo"], extra["slot_votes"] = _v3_defaults(
+        a.arbiter, a.sensor_model, a.marzullo, a.slot_votes)
+    extra["status_prior"] = a.status_prior
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return

@@ -495,7 +495,7 @@ hardware and no autopilot code is involved.
 What it does not show: behaviour on real radios, noisy sensors (one false
 refutation slashes an accuser for good, which only holds without noise), or a
 validation flood after long silence. Every figure, the holes and the commands
-are in [`SWARM_FINDINGS.md`](research/swarm/SWARM_FINDINGS.md); the 28 tests run
+are in [`SWARM_FINDINGS.md`](research/swarm/SWARM_FINDINGS.md); the tests run
 in CI (`python3 -m pytest research/swarm/tests -q`).
 
 ---
