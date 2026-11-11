@@ -56,7 +56,8 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 self_admit="always", arbiter="scalar", kinematic_gate=0,   # v2.0
                 apsa_rule=None, tomb_gap=20, liar_vote=False, liar_win=50, liar_gap=2, apsa_window="event",   # v2.1
                 fast_refute=0,                                 # v2.2
-                sensor_model="flip", marzullo=0, status_prior=False)   # v3
+                sensor_model="flip", marzullo=0, status_prior=False,
+                slot_votes=False)   # v3
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -143,12 +144,14 @@ def build_world(seed, n, events_until_ms, tick_ms=TICK_MS):
 
 # ------------------------------------------------------------------- прогон
 
-def _v3_defaults(arbiter, sensor_model=None, marzullo=None):
+def _v3_defaults(arbiter, sensor_model=None, marzullo=None, slot_votes=None):
     """v3.0: у арбитра anis по умолчанию интервальный датчик и Марзулло f=1;
-    у скалярного - как до v3. Явно заданные значения не трогаются."""
+    v3.1: и досылка голосов по спорным слотам. У скалярного - как до v3.
+    Явно заданные значения не трогаются."""
     anis = arbiter.startswith("anis")
     return (sensor_model or ("interval" if anis else "flip"),
-            (1 if anis else 0) if marzullo is None else marzullo)
+            (1 if anis else 0) if marzullo is None else marzullo,
+            anis if slot_votes is None else slot_votes)
 
 
 def run_once(cfg):
@@ -183,7 +186,7 @@ def run_once(cfg):
                 liar_gap=cfg["liar_gap"], apsa_window=cfg["apsa_window"],
                 fast_refute=cfg["fast_refute"],
                 sensor_model=cfg["sensor_model"], marzullo=cfg["marzullo"],
-                status_prior=cfg["status_prior"])
+                status_prior=cfg["status_prior"], slot_votes=cfg["slot_votes"])
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -268,7 +271,7 @@ def run_once(cfg):
         rec["apsa_window"] = cfg["apsa_window"]
     if cfg["fast_refute"]:
         rec["fast_refute"] = cfg["fast_refute"]
-    for k in ("sensor_model", "marzullo", "status_prior"):
+    for k in ("sensor_model", "marzullo", "status_prior", "slot_votes"):
         if cfg[k] != DEFAULTS[k]:
             rec[k] = cfg[k]
     if cfg["arbiter"] != "scalar":
@@ -826,7 +829,7 @@ def run_grid(cfgs, out, workers, extra):
                 rec["apsa_window"] = dict(DEFAULTS, **c)["apsa_window"]
             if dict(DEFAULTS, **c)["fast_refute"]:
                 rec["fast_refute"] = dict(DEFAULTS, **c)["fast_refute"]
-            for k in ("sensor_model", "marzullo", "status_prior"):
+            for k in ("sensor_model", "marzullo", "status_prior", "slot_votes"):
                 if dict(DEFAULTS, **c)[k] != DEFAULTS[k]:
                     rec[k] = dict(DEFAULTS, **c)[k]
             if dict(DEFAULTS, **c)["arbiter"] != "scalar":
@@ -884,7 +887,8 @@ def _cfg_key(r):
                                                   r.get("fast_refute", 0),
                                                   r.get("sensor_model", "flip"),
                                                   r.get("marzullo", 0),
-                                                  r.get("status_prior", False))
+                                                  r.get("status_prior", False),
+                                                  r.get("slot_votes", False))
 
 
 # ------------------------------------------------------------------- отчёт
@@ -1262,6 +1266,11 @@ def main():
                     help="v3, ОТВЕРГНУТ: статус против согласия >= 2 других авторов ждёт подтверждения. "
                          "565 непринятых смен статуса на связной сети, FP x9 (SWARM_FINDINGS, Часть VIII); "
                          "оставлен только для воспроизведения этих чисел")
+    ap.add_argument("--slot-votes", dest="slot_votes", action="store_true", default=None,
+                    help="v3.1: при расхождении победителя слота досылать голоса по спорным событиям ключа; "
+                         "по умолчанию включено при --arbiter anis*")
+    ap.add_argument("--no-slot-votes", dest="slot_votes", action="store_false",
+                    help="v3.1: выключить досылку голосов (воспроизведение v3.0)")
     ap.add_argument("--fast-refute", type=int, default=0,
                     help="v2.2: быстрая полоса - до N опровержений за 500 мс сразу отдельным пакетом (0 = выкл)")
     ap.add_argument("--rebut", action="store_true",
@@ -1309,7 +1318,8 @@ def main():
     extra["liar_gap"] = a.liar_gap
     extra["apsa_window"] = a.apsa_window
     extra["fast_refute"] = a.fast_refute
-    extra["sensor_model"], extra["marzullo"] = _v3_defaults(a.arbiter, a.sensor_model, a.marzullo)
+    extra["sensor_model"], extra["marzullo"], extra["slot_votes"] = _v3_defaults(
+        a.arbiter, a.sensor_model, a.marzullo, a.slot_votes)
     extra["status_prior"] = a.status_prior
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)

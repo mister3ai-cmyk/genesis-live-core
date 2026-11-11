@@ -1036,7 +1036,63 @@ def test_v3_flip_and_marzullo_off_reproduce_v22_byte_for_byte():
 
 
 def test_v3_cli_defaults_turn_on_marzullo_only_for_anis():
-    assert sim._v3_defaults("anis") == ("interval", 1)
-    assert sim._v3_defaults("anis-literal") == ("interval", 1)
-    assert sim._v3_defaults("scalar") == ("flip", 0)
-    assert sim._v3_defaults("anis", "flip", 0) == ("flip", 0)        # явное не трогаем
+    assert sim._v3_defaults("anis")[:2] == ("interval", 1)
+    assert sim._v3_defaults("anis-literal")[:2] == ("interval", 1)
+    assert sim._v3_defaults("scalar")[:2] == ("flip", 0)
+    assert sim._v3_defaults("anis", "flip", 0)[:2] == ("flip", 0)    # явное не трогаем
+
+
+def test_v31_cli_slot_votes_default_only_for_anis():
+    assert sim._v3_defaults("anis")[2] is True
+    assert sim._v3_defaults("anis-literal")[2] is True
+    assert sim._v3_defaults("scalar")[2] is False
+    assert sim._v3_defaults("anis", slot_votes=False)[2] is False     # --no-slot-votes
+    assert sim._v3_defaults("scalar", slot_votes=True)[2] is True     # --slot-votes
+    assert sim.DEFAULTS["slot_votes"] is False   # run_once без флага = v3.0 (старые конфиги)
+
+
+# v3.1 ---------------------------------------------------------------------
+
+# Отпечаток того же прогона на v3.0 (7a135fd, интервалы + Марзулло, без досылки).
+V30_ANIS_T4_FP = "8a0ec37411256d1511bb11d7f05b62fcc4ad522067c42721a741600325a22d2d"
+
+
+def test_v31_without_slot_votes_reproduces_v30_byte_for_byte():
+    cfg = dict(n=5, duration_s=30, events_until_s=20, seed=2, loss=0.05,
+               attack="T4", base_port=23500, arbiter="anis", rebut=True,
+               liar_vote=True, pull_priority="validations", pull_quiet_cap=96,
+               sensor_noise=0.05, sensor_model="interval", marzullo=1, slot_votes=False)
+    rec, res = sim.run_once(cfg)
+    assert hashlib.sha256(repr(_fingerprint(res)).encode()).hexdigest() == V30_ANIS_T4_FP
+
+
+def _slot_dispute(slot_votes):
+    truth = sim.build_world(1, 5, 20_000)["truth"]
+    k = "sector_1.status"
+    e1 = mk_node(1, n=5, truth=truth).gen_own(1000, k, sn.STATUSES[0], None)
+    e2 = mk_node(2, n=5, truth=truth).gen_own(1500, k, sn.STATUSES[1], None)
+    v1 = _votes_on(e1, truth, [(4, "confirmed", 1600)])
+    v2 = _votes_on(e2, truth, [(3, "refuted", 1600)])
+    r = mk_node(0, n=5, truth=truth, arbiter="anis", slot_votes=slot_votes)
+    for env in [e1.env, e2.env] + v1 + v2:
+        r.accept(env, 1700)
+    r.record_picture(17)
+    ki = r.keys_list.index(k)
+    assert r.win_full[ki] == e2.eid                 # у меня победитель e2, у соседа e1
+    full = {str(a): [r.contig[a], "%x" % sum(1 << (s - r.contig[a] - 1)
+                                             for s in r.held[a] if s > r.contig[a])]
+            for a in range(5)}                      # у соседа тот же журнал
+    no_votes = dict(full, **{"3": [0, "0"], "4": [0, "0"]})   # нет голосов узлов 3 и 4
+    return r, ki, e1, e2, {env["id"] for env in v1 + v2}, full, no_votes
+
+
+def test_v31_slot_dispute_sends_only_missing_votes_on_both_disputed_events():
+    r, ki, e1, e2, votes, full, no_votes = _slot_dispute(True)
+    sent = {v.eid for v in r._slot_dispute_votes(ki, e2.eid, e1.eid[7:13], no_votes)}
+    assert sent == votes                            # голоса по обоим спорным
+    assert r._slot_dispute_votes(ki, e2.eid, e1.eid[7:13], full) == []   # дублей нет
+    sl = "".join(e1.eid[7:13] if i == ki else (r.win_full[i][7:13] if i in r.win_full else "------")
+                 for i in range(len(r.keys_list)))
+    r0 = _slot_dispute(False)[0]                    # v3.0: только победитель
+    out = {ev.eid for ev in r0.answer_body({"sl": sl, "vv": full})}
+    assert e2.eid in out and not (votes & out)

@@ -478,6 +478,8 @@ class Node:
         self.vsum = {}
         self.vseen = set()
         self.vpending = {}
+        self.slot_votes = bool(cfg.get("slot_votes", False))   # v3.1
+        self.vev_by_target = {}         # v3.1: eid цели -> принятые голоса по ней
         self.revoked = {}               # автор -> (effective_from, recv_ms)
         self.key_events = []
         self.rate = {}
@@ -688,6 +690,8 @@ class Node:
         verdict = body.get("verdict")
         if verdict not in ("confirmed", "refuted"):
             return
+        if self.slot_votes:
+            self.vev_by_target.setdefault(target.eid, []).append(vev)
         meas = (body.get("evidence") or {}).get("note")
         if isinstance(meas, list) and len(meas) == 2:
             self.vmeas.setdefault(target.eid, {})[v] = meas
@@ -1596,8 +1600,12 @@ class Node:
         if isinstance(sl, str) and len(sl) == 6 * len(self.keys_list):
             for ki in range(len(self.keys_list)):
                 mine = self.win_full.get(ki)
-                if mine and mine[7:13] != sl[6 * ki:6 * ki + 6]:
+                theirs = sl[6 * ki:6 * ki + 6]
+                if mine and mine[7:13] != theirs:
                     out.append(self.events[mine])
+                    if self.slot_votes:
+                        out.extend(self._slot_dispute_votes(ki, mine, theirs,
+                                                            body.get("vv", {})))
         vv = body.get("vv", {})
         cap = PULL_CAP
         if self.pull_quiet_cap and self.clock >= self.events_until:
@@ -1620,6 +1628,23 @@ class Node:
                 out.append(self.events[self.by_seq[(a, s)]])
             if len(out) >= cap:
                 break
+        return out
+
+    def _slot_dispute_votes(self, ki, mine, theirs, vv):
+        """v3.1: победители слота у нас разные - голоса по обоим спорным
+        событиям (мой победитель и его, если он у меня есть). Решение о приёме
+        зависит от голосов, а журнал досылает их от старых к новым, и
+        решающий голос мог застрять в хвосте (зерно 10, SWARM_FINDINGS Ч. IX)."""
+        disputed = [mine]
+        if theirs != "------":
+            for _, eid, _ in self.table.slots.get(self.keys_list[ki], ()):
+                if eid[7:13] == theirs and eid != mine:
+                    disputed.append(eid)
+        out = []
+        for eid in disputed:
+            for vev in self.vev_by_target.get(eid, ()):
+                if not _vv_has(vv, vev.author, vev.seq):   # только чего у соседа нет
+                    out.append(vev)
         return out
 
     def _answer_votes_first(self, vv, out, cap):
@@ -1669,6 +1694,18 @@ class Node:
             if self.last_win.get(ki) != cur:
                 self.last_win[ki] = cur
                 self.changes.append((tick, ki, cur[0], cur[1]))
+
+
+def _vv_has(vv, a, s):
+    """Есть ли у соседа запись (a, s) по его digest: contig и битовая карта."""
+    if s is None:
+        return False
+    c, bm = vv.get(str(a), [0, "0"])
+    try:
+        bits = int(bm, 16)
+    except (TypeError, ValueError):
+        bits = 0
+    return s <= c or (s - c <= BITMAP and bool(bits >> (s - c - 1) & 1))
 
 
 class _Raw:
