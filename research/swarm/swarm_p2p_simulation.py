@@ -21,6 +21,7 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import math
 import random
 import statistics
 import sys
@@ -57,7 +58,7 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 apsa_rule=None, tomb_gap=20, liar_vote=False, liar_win=50, liar_gap=2, apsa_window="event",   # v2.1
                 fast_refute=0,                                 # v2.2
                 sensor_model="flip", marzullo=0, status_prior=False,
-                slot_votes=False)   # v3
+                slot_votes=False, world="steps")   # v3
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -66,12 +67,62 @@ PARTITIONS = {"none": "none",
 
 # --------------------------------------------------------------------- мир
 
-def build_world(seed, n, events_until_ms, tick_ms=TICK_MS):
+KIN_MODES = ("straight", "arc", "weave", "tack")
+
+
+def kinematic_track(rng, t_end_ms, modes=KIN_MODES, step_ms=100, field=200_000):
+    """v4.0: плавное движение цели. Сегменты по 4-12 с, режим на сегмент:
+    straight - прямо, скорость постоянна; arc - дуга с разгоном или
+    торможением; weave - синусоида курса; tack - смена галса на 60-120 град
+    за 1.5 с. Скорость 150-700 ед/с, отражение от краёв поля.
+    Возвращает (times, vals, mode_per_sample) с шагом step_ms."""
+    p = [rng.uniform(20_000, field - 20_000), rng.uniform(20_000, field - 20_000)]
+    h, v = rng.uniform(0, 2 * math.pi), rng.uniform(200, 600)
+    times, vals, mlab = [], [], []
+    t, dt = 0, step_ms / 1000.0
+    while t <= t_end_ms:
+        mode, seg = rng.choice(modes), rng.randint(4_000, 12_000)
+        om = rng.choice((-1, 1)) * rng.uniform(0.15, 0.4)
+        acc = rng.choice((-1, 1)) * rng.uniform(40, 120)
+        amp, per = rng.uniform(0.4, 0.8), rng.uniform(4.0, 8.0)
+        dturn = rng.choice((-1, 1)) * math.radians(rng.uniform(60, 120))
+        h0 = h
+        for s in range(seg // step_ms):
+            tau = s * dt
+            if mode == "arc":
+                h += om * dt
+                v = min(700.0, max(150.0, v + acc * dt))
+            elif mode == "weave":
+                h = h0 + amp * math.sin(2 * math.pi * tau / per)
+            elif mode == "tack" and tau < 1.5:
+                h += dturn * dt / 1.5
+            p[0] += v * math.cos(h) * dt
+            p[1] += v * math.sin(h) * dt
+            for i in (0, 1):
+                if not 0 <= p[i] <= field:
+                    p[i] = min(field, max(0.0, p[i]))
+                    h = math.pi - h if i == 0 else -h
+                    h0 = h
+            times.append(t)
+            vals.append([int(round(p[0])), int(round(p[1]))])
+            mlab.append(mode)
+            t += step_ms
+            if t > t_end_ms:
+                break
+    times[0] = 0
+    return times, vals, mlab
+
+
+def build_world(seed, n, events_until_ms, tick_ms=TICK_MS, world="steps"):
     """Истина по общим ключам и расписание событий каждого узла.
 
     Конфликт честных узлов - это смена истины в момент t: один узел пишет
     старое значение за 1-25 мс до t, другой новое через 1-25 мс после. Оба
-    правы на своё время. Остальные события - 10 в секунду на узел."""
+    правы на своё время. Остальные события - 10 в секунду на узел.
+
+    v4.0, world="kinematic": цели движутся плавно (kinematic_track), смены
+    истины с конфликтами - только у статусов секторов."""
+    kin = world == "kinematic"
     rng = random.Random("world:%s" % seed)
     shared = sn.shared_keys()
     truth = {}
@@ -88,6 +139,8 @@ def build_world(seed, n, events_until_ms, tick_ms=TICK_MS):
             break
         k = rng.choice(shared)
         old = truth[k][1][-1]
+        if kin and not k.endswith(".status"):
+            continue
         if k.endswith(".status"):
             new = rng.choice([s for s in sn.STATUSES if s != old])
         else:
@@ -96,6 +149,12 @@ def build_world(seed, n, events_until_ms, tick_ms=TICK_MS):
         truth[k][0].append(t)
         truth[k][1].append(new)
         changes.append((t, k, old, new))
+    if kin:
+        for k in shared:
+            if k.endswith(".pos"):
+                tt, vv, _ = kinematic_track(random.Random("kin:%s:%s" % (seed, k)),
+                                            events_until_ms + 20_000)
+                truth[k] = (tt, vv)
 
     def noisy(v):
         if isinstance(v, list):
@@ -158,7 +217,7 @@ def run_once(cfg):
     cfg = dict(DEFAULTS, **cfg)
     n = cfg["n"]
     world = build_world(cfg["seed"], n, cfg["events_until_s"] * 1000,
-                        cfg["tick_ms"])
+                        cfg["tick_ms"], cfg["world"])
     base = dict(n=n, seed=cfg["seed"], branch=cfg["branch"], loss=cfg["loss"],
                 topology=cfg["topology"],
                 partition=PARTITIONS.get(cfg["partition"], cfg["partition"]),
@@ -271,7 +330,7 @@ def run_once(cfg):
         rec["apsa_window"] = cfg["apsa_window"]
     if cfg["fast_refute"]:
         rec["fast_refute"] = cfg["fast_refute"]
-    for k in ("sensor_model", "marzullo", "status_prior", "slot_votes"):
+    for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world"):
         if cfg[k] != DEFAULTS[k]:
             rec[k] = cfg[k]
     if cfg["arbiter"] != "scalar":
@@ -618,7 +677,7 @@ def attack_metrics(cfg, results, honest, keys, kidx, tick):
             passed = sum(1 for e in ids if e in ever_eid)
         r["passed"] = passed
         r["blocked_frac"] = None if passed is None else _r(1 - passed / max(len(items), 1))
-        if typ == "T4":
+        if typ in ("T4", "T8"):
             ids = {eid for (eid, _, _, _) in items}
             # v1.3: время вытеснения (TtE) - сколько секунд каждая ложь была
             # в картине большинства честных узлов
@@ -829,7 +888,7 @@ def run_grid(cfgs, out, workers, extra):
                 rec["apsa_window"] = dict(DEFAULTS, **c)["apsa_window"]
             if dict(DEFAULTS, **c)["fast_refute"]:
                 rec["fast_refute"] = dict(DEFAULTS, **c)["fast_refute"]
-            for k in ("sensor_model", "marzullo", "status_prior", "slot_votes"):
+            for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world"):
                 if dict(DEFAULTS, **c)[k] != DEFAULTS[k]:
                     rec[k] = dict(DEFAULTS, **c)[k]
             if dict(DEFAULTS, **c)["arbiter"] != "scalar":
@@ -1180,7 +1239,7 @@ def main():
     ap.add_argument("--partition", default="none",
                     help="none | isolate | split | или спецификация swarm_net")
     ap.add_argument("--attack", default="none",
-                    choices=("none", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "all"))
+                    choices=("none", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "all"))
     ap.add_argument("--attacker", type=int, default=4)
     ap.add_argument("--trust-init", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1)
@@ -1271,6 +1330,8 @@ def main():
                          "по умолчанию включено при --arbiter anis*")
     ap.add_argument("--no-slot-votes", dest="slot_votes", action="store_false",
                     help="v3.1: выключить досылку голосов (воспроизведение v3.0)")
+    ap.add_argument("--world", default="steps", choices=("steps", "kinematic"),
+                    help="v4.0: цели прыгают раз в ~4 с (steps, как до v4) или движутся плавно (kinematic)")
     ap.add_argument("--fast-refute", type=int, default=0,
                     help="v2.2: быстрая полоса - до N опровержений за 500 мс сразу отдельным пакетом (0 = выкл)")
     ap.add_argument("--rebut", action="store_true",
@@ -1321,6 +1382,7 @@ def main():
     extra["sensor_model"], extra["marzullo"], extra["slot_votes"] = _v3_defaults(
         a.arbiter, a.sensor_model, a.marzullo, a.slot_votes)
     extra["status_prior"] = a.status_prior
+    extra["world"] = a.world
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return

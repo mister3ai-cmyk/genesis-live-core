@@ -1183,6 +1183,15 @@ class Node:
             ev = self.gen_own(t_ms, key, value, tag, label="T6")
             self.attack_log.append(("T6", ev.eid[7:23], key, ev.vh, t_ms))
             return
+        if "T8" in a and t_ms >= ATTACK_START_MS and is_shared(key) and key.endswith(".pos"):
+            # v4.0: адаптивная ложь - сдвиг 600-1500 по оси, внутри допуска
+            # Марзулло (источник +-MZ_H+MZ_D), но вне допуска датчика (POS_TOL)
+            tv = truth_at(self.truth, key, t_ms)
+            value = [tv[i] + self.lie_rng.choice((-1, 1)) * self.lie_rng.randint(600, 1500)
+                     for i in (0, 1)]
+            ev = self.gen_own(t_ms, key, value, None, label="T8")
+            self.attack_log.append(("T8", ev.eid[7:23], key, ev.vh, t_ms))
+            return
         if "T4" in a and t_ms >= ATTACK_START_MS and is_shared(key):
             r = self.lie(key, t_ms)
             if isinstance(r, tuple):

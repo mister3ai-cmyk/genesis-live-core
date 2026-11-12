@@ -1096,3 +1096,37 @@ def test_v31_slot_dispute_sends_only_missing_votes_on_both_disputed_events():
     r0 = _slot_dispute(False)[0]                    # v3.0: только победитель
     out = {ev.eid for ev in r0.answer_body({"sl": sl, "vv": full})}
     assert e2.eid in out and not (votes & out)
+
+
+# v4.0 ---------------------------------------------------------------------
+
+def test_v40_default_world_is_the_old_steps_world():
+    a = sim.build_world(3, 5, 60_000)
+    b = sim.build_world(3, 5, 60_000, world="steps")
+    assert a == b
+
+
+def test_v40_kinematic_world_moves_targets_smoothly():
+    w = sim.build_world(1, 5, 120_000, world="kinematic")
+    for k in sn.shared_keys():
+        times, vals = w["truth"][k]
+        if k.endswith(".pos"):
+            assert times[0] == 0 and all(b - a == 100 for a, b in zip(times, times[1:]))
+            steps = [max(abs(q[0] - p[0]), abs(q[1] - p[1])) for p, q in zip(vals, vals[1:])]
+            assert max(steps) <= 71 and min(steps) > 0      # 150-700 ед/с, шаг 100 мс
+        else:
+            assert len(times) > 1                           # статусы по-прежнему меняются
+
+
+def test_v40_t8_lie_is_inside_marzullo_and_outside_sensor_tolerance():
+    truth = sim.build_world(1, 5, 120_000, world="kinematic")["truth"]
+    liar = mk_node(4, n=5, truth=truth, attack="T8")
+    t = sn.ATTACK_START_MS + 1000
+    liar.generate(t, "target_2.pos", [0, 0], None)
+    ev = liar.events[max(liar.events, key=lambda e: liar.events[e].hlc[0])]
+    tv = sn.truth_at(truth, "target_2.pos", t)
+    off = [abs(ev.value[i] - tv[i]) for i in (0, 1)]
+    assert all(600 <= o <= 1500 for o in off)
+    assert all(o > sn.Sensor.POS_TOL for o in off)
+    assert all(o < sn.MZ_H + sn.MZ_D for o in off)
+    assert liar.attack_log[-1][0] == "T8"
