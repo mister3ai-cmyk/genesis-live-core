@@ -20,6 +20,10 @@ jobs:
         working-directory: tests
         run: make check CC=${{ matrix.cc }} CPPFLAGS="${{ matrix.cppflags }}"
 
+      - name: rt_core (C99, -Werror, no malloc)
+        working-directory: research/rt_core
+        run: make check check-nomalloc CC=${{ matrix.cc }}
+
       - name: Build
         working-directory: benchmarks
         run: make CC=${{ matrix.cc }} CPPFLAGS="${{ matrix.cppflags }}"
@@ -39,6 +43,9 @@ jobs:
 
       - name: Install test dependencies
         run: python -m pip install numpy pytest cryptography
+
+      - name: Build rt_core for ctypes tests
+        run: make -C research/rt_core librt_core.so
 
       - name: Python tests
         run: python -m pytest -q
