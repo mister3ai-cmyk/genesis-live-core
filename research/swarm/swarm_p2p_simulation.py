@@ -58,7 +58,7 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 apsa_rule=None, tomb_gap=20, liar_vote=False, liar_win=50, liar_gap=2, apsa_window="event",   # v2.1
                 fast_refute=0,                                 # v2.2
                 sensor_model="flip", marzullo=0, status_prior=False,
-                slot_votes=False, world="steps", traj_gate=False)   # v3
+                slot_votes=False, world="steps", traj_gate=False, tomb_backoff=None)   # v3
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -249,7 +249,10 @@ def run_once(cfg):
                 # шлюзу нужно общее время: при дрейфе +-2 с (мир steps) он
                 # опроверг 143 980 честных заявок на сетке 490 - только kinematic
                 traj_gate=cfg["traj_gate"] and cfg["world"] == "kinematic",
-                drift_max_ms=20 if cfg["world"] == "kinematic" else 2000)
+                drift_max_ms=20 if cfg["world"] == "kinematic" else 2000,
+                world=cfg["world"],
+                tomb_backoff=(cfg["world"] == "kinematic" if cfg["tomb_backoff"] is None
+                              else cfg["tomb_backoff"]))
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -334,7 +337,8 @@ def run_once(cfg):
         rec["apsa_window"] = cfg["apsa_window"]
     if cfg["fast_refute"]:
         rec["fast_refute"] = cfg["fast_refute"]
-    for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world", "traj_gate"):
+    for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world", "traj_gate",
+              "tomb_backoff"):
         if cfg[k] != DEFAULTS[k]:
             rec[k] = cfg[k]
     if cfg["arbiter"] != "scalar":
@@ -574,6 +578,7 @@ def compute_metrics(cfg, world, results):
     m["mz_suppressed"] = sum(results[i].get("mz_suppressed", 0) for i in honest)
     m["traj_checks"] = sum(results[i].get("traj_checks", 0) for i in honest)
     m["traj_veto"] = sum(results[i].get("traj_veto", 0) for i in honest)
+    m["traj_veto_bad"] = sum(results[i].get("traj_veto_bad", 0) for i in honest)
     # v3: задержка приёма честной смены истины (первое сообщение о новом
     # значении, тег ("C", pid, "new")) у остальных честных узлов, мс
     tagged = {eid: (key, author) for eid, (key, vh, l, c, author, gen, label, tag)
@@ -894,7 +899,8 @@ def run_grid(cfgs, out, workers, extra):
                 rec["apsa_window"] = dict(DEFAULTS, **c)["apsa_window"]
             if dict(DEFAULTS, **c)["fast_refute"]:
                 rec["fast_refute"] = dict(DEFAULTS, **c)["fast_refute"]
-            for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world", "traj_gate"):
+            for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world", "traj_gate",
+                      "tomb_backoff"):
                 if dict(DEFAULTS, **c)[k] != DEFAULTS[k]:
                     rec[k] = dict(DEFAULTS, **c)[k]
             if dict(DEFAULTS, **c)["arbiter"] != "scalar":

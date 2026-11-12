@@ -562,6 +562,13 @@ class Node:
         self.traj_cache = {}        # eid -> (версия данных, решение)
         self.traj_checks = 0        # мой датчик против заявки, прогноз посчитан
         self.traj_veto = 0          # прогноз за мой датчик: опровергаю
+        self.traj_veto_bad = 0      # ...а заявка была верна в свой момент (ошибка шлюза)
+        # v4.0: мир kinematic - ложность опровержения по истине в момент события
+        self.point_truth = cfg.get("world") == "kinematic"
+        # v4.0 (вектор B): надгробия в PULL - не в каждом ответе, а с отступом
+        # 1, 2, 4 ... 30 с на соседа (до этого шли в каждый ответ весь прогон)
+        self.tomb_backoff = bool(cfg.get("tomb_backoff", False))
+        self.tomb_sent = {}         # (сосед, eid) -> (следующий раз, мс; интервал, мс)
         self.false_ref = {"pos": 0, "status": 0}   # инструментовка: опровергнута правда
         if self.anis:
             self.slash = True
@@ -1073,6 +1080,8 @@ class Node:
             if ok is not False and self.traj_gate and ev.key.endswith(".pos") \
                     and self.sensor.model == "interval" and self._traj_refutes(ev):
                 self.traj_veto += 1
+                if self._claim_true(ev):
+                    self.traj_veto_bad += 1
                 ok = False
             if ok is None:
                 pass
@@ -1099,6 +1108,18 @@ class Node:
         if nb >= 5 and nb >= 0.25 * len(q):
             gap = self.liar_gap if self.liar_gap is not None else self.tomb_gap // 2
             self.bury("lie", a, nb / len(q), gap, self.kin_n.get(a, 0))
+
+    def _claim_true(self, ev):
+        """v4.0, учёт: заявка верна в свой момент (истина +- POS_TOL; статус -
+        совпадает). Окно +-5 с датчика для движущейся цели засчитывало ложь T8
+        как правду (SWARM_FINDINGS, Часть XI, A6 п. 3)."""
+        tv = truth_at(self.truth, ev.key, ev.hlc[0])
+        if not ev.key.endswith(".pos"):
+            return ev.value == tv
+        try:
+            return max(abs(ev.value[0] - tv[0]), abs(ev.value[1] - tv[1])) <= Sensor.POS_TOL
+        except (TypeError, IndexError):
+            return False
 
     def _traj_refutes(self, ev):
         """v4.0, шлюз --traj-gate: опровергнуть, только если мой датчик
@@ -1162,7 +1183,8 @@ class Node:
             else:
                 note = self.sensor.reading(ev.key, ev.value, ev.hlc[0])
         if (verdict == "refuted" and not self.is_attacker
-                and self.sensor._check(ev.key, ev.value, ev.hlc[0], now_ms)):
+                and (self._claim_true(ev) if self.point_truth
+                     else self.sensor._check(ev.key, ev.value, ev.hlc[0], now_ms))):
             self.false_ref["pos" if ev.key.endswith(".pos") else "status"] += 1
         body = {"glyph_hash": ev.eid, "verdict": verdict,
                 "evidence": {"applied_in": "sensor:" + ev.key, "note": note},
@@ -1612,7 +1634,7 @@ class Node:
         if a >= self.n or not verify_raw(self.keys[a].pub, g["sig"], g["signed"]):
             self.reject("digest")
             return []
-        return self.answer_body(g["body"])
+        return self.answer_body(g["body"], a)
 
     # ------------------------------------------------------------ PULL
 
@@ -1640,10 +1662,21 @@ class Node:
         if check_env(env, self.pubs):
             self.reject("digest")
             return []
-        return self.answer_body(env["body"])
+        return self.answer_body(env["body"], self.idx_of.get(env.get("author")))
 
-    def answer_body(self, body):
-        out = list(self.tomb_events)
+    def _tombs_for(self, peer):
+        if not self.tomb_backoff or peer is None:
+            return list(self.tomb_events)
+        out = []
+        for ev in self.tomb_events:
+            nxt, gap = self.tomb_sent.get((peer, ev.eid), (0, 1000))
+            if self.clock >= nxt:
+                out.append(ev)
+                self.tomb_sent[(peer, ev.eid)] = (self.clock + gap, min(2 * gap, 30_000))
+        return out
+
+    def answer_body(self, body, peer=None):
+        out = self._tombs_for(peer)
         for ke in self.key_events:
             if self.idx_of[ke.env["body"]["key"]] not in body.get("rev", []):
                 out.append(ke)
@@ -2006,6 +2039,7 @@ def run_node(cfg, idx, barrier, counts, q):
         "fast_sent": node.fast_sent,
         "mz_suppressed": node.mz_suppressed,
         "traj_checks": node.traj_checks, "traj_veto": node.traj_veto,
+        "traj_veto_bad": node.traj_veto_bad,
         "false_ref": node.false_ref,
         "tombs": [[e.author, e.env["body"]["target"], e.env["body"].get("src"), e.env["body"].get("s"), e.arrival]
                   for e in node.tomb_events if e.author == idx],

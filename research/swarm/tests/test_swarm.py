@@ -1182,3 +1182,31 @@ def test_v40_traj_gate_needs_the_kinematic_world():
                                  arbiter="anis", sensor_model="interval", marzullo=1,
                                  traj_gate=True))
     assert rec["metrics"]["traj_checks"] == 0
+
+
+def test_v40_tombstones_in_pull_back_off_per_peer():
+    r = mk_node(0, n=5, tomb_backoff=True)
+    r.tomb_events = [sn.Ev("t" * 64, "tombstone", 0, {}, 0, {})]
+    sent = []
+    for ms in range(0, 40_000, 500):
+        r.clock = ms
+        if r._tombs_for(1):
+            sent.append(ms)
+    assert sent == [0, 1000, 3000, 7000, 15_000, 31_000]      # отступ 1, 2, 4, 8, 16 с
+    r.clock = 31_500
+    assert r._tombs_for(2)                                       # свой счёт у каждого соседа
+    plain = mk_node(0, n=5)
+    plain.tomb_events = r.tomb_events
+    assert plain._tombs_for(1) == plain._tombs_for(1) == r.tomb_events   # v3.1: в каждом ответе
+
+
+def test_v40_claim_truth_is_judged_at_the_claim_moment():
+    truth = sim.build_world(1, 5, 120_000, world="kinematic")["truth"]
+    r = mk_node(0, n=5, truth=truth, world="kinematic")
+    au = mk_node(1, n=5, truth=truth)
+    k, t = "target_0.pos", 70_000
+    tv = sn.truth_at(truth, k, t)
+    ok = au.gen_own(t, k, [tv[0] + 40, tv[1] - 40], None)
+    lie = au.gen_own(t + 5, k, [tv[0] + 900, tv[1] + 900], None)
+    assert r._claim_true(ok) and not r._claim_true(lie)
+    assert r.point_truth and not mk_node(0, n=5).point_truth
