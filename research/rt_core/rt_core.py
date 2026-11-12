@@ -34,6 +34,7 @@ def load(path=None):
     lib.rt_gr_chordal2.restype = D
     lib.rt_xcorr_delay.argtypes = [DP, DP, I, I, D, DP, DP]
     lib.rt_xcorr_delay_multi.argtypes = [DP, DP, I, I, I, D, DP, DP]
+    lib.rt_kin_forget_author.argtypes = [P, I, I]
     return lib
 
 

@@ -195,6 +195,26 @@ static void test_kinematics(void)
     CHECK(c.ring[0].count == RT_RING);
     CHECK(c.ring[0].obs[(c.ring[0].head + RT_RING - 1) % RT_RING].t_us == 2000000 + RT_RING + 4);
     CHECK(rt_ctx_size() == sizeof(rt_context_t));
+
+    /* карантин: лжец забыт - окно и суммы как будто его не было */
+    {
+        static rt_context_t clean;
+        double pc[3];
+        rt_init(&c, NULL);
+        feed(&c, line, 0);                            /* автор 0 лжёт */
+        rt_init(&clean, NULL);
+        feed(&clean, line, -1);
+        CHECK(rt_kin_forget_author(&c, 0, 0) == 4);
+        CHECK(c.ring[0].count == 12 && rt_kin_sums_check(&c, 0) < 1e-12);
+        CHECK(rt_kin_predict(&c, 0, T, -1, p) == RT_OK);
+        CHECK(rt_kin_forget_author(&clean, 0, 0) == 4);
+        CHECK(rt_kin_predict(&clean, 0, T, -1, pc) == RT_OK);
+        CHECK(fabs(p[0] - pc[0]) < 1e-9 && fabs(p[1] - pc[1]) < 1e-9);
+        line(1.0, q);
+        CHECK(rt_kin_push(&c, 0, 1, 9000000, 9000000, q) == RT_OK);   /* запись после удаления */
+        CHECK(c.ring[0].count == 13 && rt_kin_sums_check(&c, 0) < 1e-12);
+        CHECK(rt_kin_forget_author(&c, 0, RT_MAX_AUTHORS) == RT_ERR_ARG);
+    }
 }
 
 /* Дрейф инкрементальных сумм: 10^5 записей подряд, 4 автора, координаты

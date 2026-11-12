@@ -109,6 +109,28 @@ int rt_kin_push(rt_context_t *ctx, int target, int author,
     return RT_OK;
 }
 
+int rt_kin_forget_author(rt_context_t *ctx, int target, int author)
+{
+    rt_ring_t *r;
+    rt_obs_t tmp[RT_RING];
+    int i, n = 0, removed;
+    if (!ctx || target < 0 || target >= RT_MAX_TARGETS || author < 0 || author >= RT_MAX_AUTHORS)
+        return RT_ERR_ARG;
+    r = &ctx->ring[target];
+    for (i = 0; i < r->count; i++) {             /* от старейшего к новейшему */
+        const rt_obs_t *o = &r->obs[(r->head - r->count + i + RT_RING) % RT_RING];
+        if (o->author != author)
+            rt_copy(&tmp[n++], o, sizeof(*o));
+    }
+    removed = r->count - n;
+    for (i = 0; i < n; i++)
+        rt_copy(&r->obs[i], &tmp[i], sizeof(tmp[i]));
+    r->count = n;
+    r->head = n % RT_RING;
+    rt_zero(&r->sums[author], sizeof(r->sums[author]));
+    return removed;
+}
+
 double rt_kin_sums_check(const rt_context_t *ctx, int target)
 {
     static const double one = 1.0;
