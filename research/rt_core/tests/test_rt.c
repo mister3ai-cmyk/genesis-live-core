@@ -235,7 +235,7 @@ static void test_incremental_drift(void)
     int i, ok_pred = 1, n_cmp = 0;
     rt_init(&c, NULL);
     for (tick = 1; tick <= 100000; tick++) {
-        int64_t t = tick * 125000;
+        int64_t t = (int64_t)tick * 125000;          /* long на 32-битных целях - 32 бита */
         double p[3];
         ring_traj((double)t / 1e6, p);
         if (rt_kin_push(&c, 0, (int)(tick % 4), t, t, p) != RT_OK)
@@ -263,8 +263,8 @@ static void test_incremental_drift(void)
                 ok_pred = 0;
         }
     }
-    printf("дрейф за 10^5 записей: суммы %.2e, прогноз %.2e (отн.), перебазирований %u\n",
-           worst_sum, worst_pred, c.ring[0].n_rebase);
+    printf("дрейф за 10^5 записей: суммы %.2e, прогноз %.2e (отн.), перебазирований %lu\n",
+           worst_sum, worst_pred, (unsigned long)c.ring[0].n_rebase);
     CHECK(ok_pred && n_cmp == 100);
     CHECK(worst_sum < 1e-9);
     CHECK(worst_pred < 1e-9);
