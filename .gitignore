@@ -11,6 +11,8 @@ tests/test_srp_lsh
 research/rt_core/tests/test_rt
 research/rt_core/bench/bench_rt
 research/rt_core/data/
+research/rt_core/build/
+*.su
 benchmarks/cold_cache
 venv/
 .venv/

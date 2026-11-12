@@ -9,6 +9,7 @@
 
 #include "rt_grassmann.h"
 #include "rt_kinematics.h"
+#include "rt_xcorr.h"
 
 #define N_RUNS 100000
 
@@ -156,6 +157,24 @@ int main(void)
         samples[i] = now_ns() - t0;
     }
     report("rt_gr_orth_mgs, 64 x 4", overhead);
+    {   /* взаимная корреляция: окно 2 с при 200 Гц, 3 канала, сдвиги +-20 */
+        static double xa[3 * 400], xb[3 * 400];
+        double lag, peak;
+        int n_x = 2000;
+        for (i = 0; i < 3 * 400; i++) {
+            xa[i] = urand();
+            xb[i] = xa[i] + 0.1 * urand();
+        }
+        for (i = 0; i < n_x; i++) {
+            t0 = now_ns();
+            sink = rt_xcorr_delay_multi(xa, xb, 400, 3, 20, 1e-6, &lag, &peak);
+            samples[i] = now_ns() - t0;
+        }
+        qsort(samples, n_x, sizeof(double), cmp);
+        printf("%-46s p50 %8.1f мкс  p99 %8.1f мкс (%d вызовов)\n", "rt_xcorr_delay_multi, 400 x 3, +-20",
+               (samples[n_x / 2] - overhead) / 1e3, (samples[n_x * 99 / 100] - overhead) / 1e3, n_x);
+    }
+
     /* пачкой: один интервал на N_RUNS вызовов - без дрожания таймера на вызов */
     printf("\nпачкой (%d вызовов за один замер, среднее):\n", N_RUNS);
     t0 = now_ns();

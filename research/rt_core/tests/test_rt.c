@@ -6,6 +6,8 @@
 
 #include "rt_grassmann.h"
 #include "rt_kinematics.h"
+#include "rt_port.h"
+#include "rt_xcorr.h"
 
 static int n_ok, n_fail;
 
@@ -193,6 +195,26 @@ static void test_kinematics(void)
     CHECK(c.ring[0].count == RT_RING);
     CHECK(c.ring[0].obs[(c.ring[0].head + RT_RING - 1) % RT_RING].t_us == 2000000 + RT_RING + 4);
     CHECK(rt_ctx_size() == sizeof(rt_context_t));
+
+    /* карантин: лжец забыт - окно и суммы как будто его не было */
+    {
+        static rt_context_t clean;
+        double pc[3];
+        rt_init(&c, NULL);
+        feed(&c, line, 0);                            /* автор 0 лжёт */
+        rt_init(&clean, NULL);
+        feed(&clean, line, -1);
+        CHECK(rt_kin_forget_author(&c, 0, 0) == 4);
+        CHECK(c.ring[0].count == 12 && rt_kin_sums_check(&c, 0) < 1e-12);
+        CHECK(rt_kin_predict(&c, 0, T, -1, p) == RT_OK);
+        CHECK(rt_kin_forget_author(&clean, 0, 0) == 4);
+        CHECK(rt_kin_predict(&clean, 0, T, -1, pc) == RT_OK);
+        CHECK(fabs(p[0] - pc[0]) < 1e-9 && fabs(p[1] - pc[1]) < 1e-9);
+        line(1.0, q);
+        CHECK(rt_kin_push(&c, 0, 1, 9000000, 9000000, q) == RT_OK);   /* запись после удаления */
+        CHECK(c.ring[0].count == 13 && rt_kin_sums_check(&c, 0) < 1e-12);
+        CHECK(rt_kin_forget_author(&c, 0, RT_MAX_AUTHORS) == RT_ERR_ARG);
+    }
 }
 
 /* Дрейф инкрементальных сумм: 10^5 записей подряд, 4 автора, координаты
@@ -249,11 +271,72 @@ static void test_incremental_drift(void)
     CHECK(c.ring[0].n_rebase > 0);
 }
 
+/* Взаимная корреляция: сигнал с известной задержкой (целой и дробной),
+ * шум, сигнал без возбуждения. */
+static double sig(double t)
+{
+    return sin(1.3 * t) + 0.6 * sin(3.7 * t + 0.4) + 0.3 * sin(9.1 * t + 1.1);
+}
+
+static void test_xcorr(void)
+{
+    static double a[400], b[400];
+    double lag, peak, shifts[4] = {0.0, 4.0, -7.0, 2.5};
+    int i, s;
+    for (s = 0; s < 4; s++) {
+        for (i = 0; i < 400; i++) {                   /* 200 Гц, b отстаёт на shifts[s] */
+            a[i] = sig(i / 200.0);
+            b[i] = sig((i - shifts[s]) / 200.0);
+        }
+        CHECK(rt_xcorr_delay(a, b, 400, 20, 1e-6, &lag, &peak) == RT_OK);
+        CHECK(fabs(lag - shifts[s]) < 0.05 && peak > 0.999);
+        for (i = 0; i < 400; i++)
+            b[i] += 0.1 * urand();                    /* шум 10 % */
+        CHECK(rt_xcorr_delay(a, b, 400, 20, 1e-6, &lag, &peak) == RT_OK);
+        CHECK(fabs(lag - shifts[s]) < 0.5);
+    }
+    for (i = 0; i < 400; i++)
+        b[i] = 0.3 + 1e-5 * urand();                  /* висение: почти константа */
+    CHECK(rt_xcorr_delay(a, b, 400, 20, 1e-4, &lag, &peak) == RT_ERR_LOW_EXCITATION);
+    CHECK(rt_xcorr_delay(a, a, 400, 101, 1e-6, &lag, &peak) == RT_ERR_ARG);   /* > n/4 */
+    CHECK(rt_xcorr_delay(a, a, 400, 0, 1e-6, &lag, &peak) == RT_ERR_ARG);
+    {   /* 3 канала: один постоянный (вращение вокруг оси без изменения), два несут сдвиг 6 */
+        static double A3[3 * 400], B3[3 * 400];
+        for (i = 0; i < 400; i++) {
+            A3[i] = 1.57;
+            B3[i] = 1.57;
+            A3[400 + i] = sig(i / 200.0);
+            B3[400 + i] = sig((i - 6.0) / 200.0);
+            A3[800 + i] = sig(0.7 * i / 200.0 + 2.0);
+            B3[800 + i] = sig(0.7 * (i - 6.0) / 200.0 + 2.0);
+        }
+        CHECK(rt_xcorr_delay_multi(A3, B3, 400, 3, 20, 1e-6, &lag, &peak) == RT_OK);
+        CHECK(fabs(lag - 6.0) < 0.05 && peak > 0.999);
+        CHECK(rt_xcorr_delay(A3, B3, 400, 20, 1e-6, &lag, &peak) == RT_ERR_LOW_EXCITATION);
+    }
+}
+
+static void test_sqrt_newton(void)
+{
+    double worst = 0.0, x = 1e-300;
+    while (x < 1e300) {
+        double e = fabs(rt_sqrt_newton(x) - sqrt(x)) / sqrt(x);
+        if (e > worst)
+            worst = e;
+        x *= 1.37;
+    }
+    CHECK(worst < 4.5e-16);                          /* ~2 ulp */
+    CHECK(rt_sqrt_newton(0.0) == 0.0 && rt_sqrt_newton(-4.0) == 0.0);
+    CHECK(rt_sqrt_newton(4.0) == 2.0);
+}
+
 int main(void)
 {
     test_grassmann();
     test_kinematics();
     test_incremental_drift();
+    test_xcorr();
+    test_sqrt_newton();
     printf("rt_core: %d passed, %d failed\n", n_ok, n_fail);
     return n_fail ? 1 : 0;
 }

@@ -1,8 +1,7 @@
 /* Business Source License 1.1 - см. research/LICENSE */
-#include <math.h>
-#include <string.h>
 
 #include "rt_kinematics.h"
+#include "rt_port.h"
 
 #define RT_T_NONE INT64_MIN
 
@@ -26,9 +25,9 @@ int rt_init(rt_context_t *ctx, const rt_cfg_t *cfg)
     int t, a;
     if (!ctx)
         return RT_ERR_ARG;
-    memset(ctx, 0, sizeof(*ctx));
+    rt_zero(ctx, sizeof(*ctx));
     if (cfg)
-        ctx->cfg = *cfg;
+        rt_copy(&ctx->cfg, cfg, sizeof(ctx->cfg));
     else
         rt_cfg_default(&ctx->cfg);
     for (t = 0; t < RT_MAX_TARGETS; t++)
@@ -66,7 +65,7 @@ static void rebase(rt_ring_t *r, int64_t t_us)
 {
     int i;
     r->t0_us = t_us;
-    memset(r->sums, 0, sizeof(r->sums));
+    rt_zero(r->sums, sizeof(r->sums));
     for (i = 0; i < r->count; i++)
         raw_add(&r->sums[r->obs[i].author], loc_s(r, r->obs[i].t_us), r->obs[i].p, 1.0);
     r->n_evict = 0;
@@ -102,12 +101,34 @@ int rt_kin_push(rt_context_t *ctx, int target, int author,
     r->head = (r->head + 1) % RT_RING;
     if (r->count < RT_RING)
         r->count++;
-    if (fabs(loc_s(r, t_us)) > RT_REBASE_S || r->n_evict >= RT_REBASE_EVICT)
+    if (RT_FABS(loc_s(r, t_us)) > RT_REBASE_S || r->n_evict >= RT_REBASE_EVICT)
         rebase(r, t_us);
     else
         raw_add(&r->sums[author], loc_s(r, t_us), p, 1.0);
     ctx->n_push++;
     return RT_OK;
+}
+
+int rt_kin_forget_author(rt_context_t *ctx, int target, int author)
+{
+    rt_ring_t *r;
+    rt_obs_t tmp[RT_RING];
+    int i, n = 0, removed;
+    if (!ctx || target < 0 || target >= RT_MAX_TARGETS || author < 0 || author >= RT_MAX_AUTHORS)
+        return RT_ERR_ARG;
+    r = &ctx->ring[target];
+    for (i = 0; i < r->count; i++) {             /* от старейшего к новейшему */
+        const rt_obs_t *o = &r->obs[(r->head - r->count + i + RT_RING) % RT_RING];
+        if (o->author != author)
+            rt_copy(&tmp[n++], o, sizeof(*o));
+    }
+    removed = r->count - n;
+    for (i = 0; i < n; i++)
+        rt_copy(&r->obs[i], &tmp[i], sizeof(tmp[i]));
+    r->count = n;
+    r->head = n % RT_RING;
+    rt_zero(&r->sums[author], sizeof(r->sums[author]));
+    return removed;
 }
 
 double rt_kin_sums_check(const rt_context_t *ctx, int target)
@@ -120,18 +141,18 @@ double rt_kin_sums_check(const rt_context_t *ctx, int target)
     if (!ctx || target < 0 || target >= RT_MAX_TARGETS)
         return -1.0;
     r = &ctx->ring[target];
-    memset(D, 0, sizeof(D));
+    rt_zero(D, sizeof(D));
     for (i = 0; i < r->count; i++)
         raw_add(&D[r->obs[i].author], loc_s(r, r->obs[i].t_us), r->obs[i].p, one);
     for (a = 0; a < RT_MAX_AUTHORS; a++) {
         for (k = 0; k < 5; k++) {
-            double e = fabs(r->sums[a].S[k] - D[a].S[k]) / (fabs(D[a].S[k]) + 1.0);
+            double e = RT_FABS(r->sums[a].S[k] - D[a].S[k]) / (RT_FABS(D[a].S[k]) + 1.0);
             if (e > worst)
                 worst = e;
         }
         for (k = 0; k < 3; k++)
             for (ax = 0; ax < 3; ax++) {
-                double e = fabs(r->sums[a].B[k][ax] - D[a].B[k][ax]) / (fabs(D[a].B[k][ax]) + 1.0);
+                double e = RT_FABS(r->sums[a].B[k][ax] - D[a].B[k][ax]) / (RT_FABS(D[a].B[k][ax]) + 1.0);
                 if (e > worst)
                     worst = e;
             }
@@ -159,9 +180,9 @@ static int solve3(int m, double A[3][3], double B[3][3], double X[3][3])
     for (c = 0; c < m; c++) {
         piv = c;
         for (r = c + 1; r < m; r++)
-            if (fabs(A[r][c]) > fabs(A[piv][c]))
+            if (RT_FABS(A[r][c]) > RT_FABS(A[piv][c]))
                 piv = r;
-        if (fabs(A[piv][c]) < 1e-12)
+        if (RT_FABS(A[piv][c]) < 1e-12)
             return 0;
         if (piv != c) {
             for (k = 0; k < m; k++) {
@@ -249,9 +270,9 @@ static int fit_sums(const sums_t *S, double coef[3][3], int *deg)
     int m;
     *deg = S->n >= 6 ? 2 : 1;
     m = *deg + 1;
-    memcpy(A, S->A, sizeof(A));
-    memcpy(B, S->B, sizeof(B));
-    memset(coef, 0, sizeof(double) * 9);
+    rt_copy(A, S->A, sizeof(A));
+    rt_copy(B, S->B, sizeof(B));
+    rt_zero(coef, sizeof(double) * 9);
     return solve3(m, A, B, coef);
 }
 
@@ -301,7 +322,7 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
         return RT_ERR_ARG;
     r = &ctx->ring[target];
     P.n = 0;
-    memset(outside, 0, sizeof(outside));
+    rt_zero(outside, sizeof(outside));
     for (i = 0; i < r->count; i++) {
         const rt_obs_t *o = &r->obs[i];
         if (o->author == exclude_author)
@@ -333,12 +354,13 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
     /* суммы автора в окне = суммы, веденные при записи, минус точки вне
        окна; сдвиг из локального времени кольца к tau = s - s_q. Кандидат
        «без автора a» = итог - суммы a: O(авторов), а не O(точек) */
-    memset(&total, 0, sizeof(total));
+    rt_zero(&total, sizeof(total));
     s_q = loc_s(r, t_us);
     for (s = 0; s < n_auth; s++) {
-        rt_sums_t w = r->sums[authors[s]];
+        rt_sums_t w;
         const rt_sums_t *x = &outside[authors[s]];
         int k, ax;
+        rt_copy(&w, &r->sums[authors[s]], sizeof(w));
         for (k = 0; k < 5; k++)
             w.S[k] -= x->S[k];
         for (k = 0; k < 3; k++)
@@ -360,7 +382,7 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
     /* кандидаты: s = -1 - все авторы; s >= 0 - все, кроме authors[s] */
     for (s = -1; s < (n_auth > 2 ? n_auth : 0); s++) {
         int n_in = 0;
-        S = total;
+        rt_copy(&S, &total, sizeof(S));
         if (s >= 0) {
             int a, b;
             for (a = 0; a < 3; a++)
@@ -388,8 +410,8 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
             if (!beaten && n_in > best_n) {
                 best_n = n_in;
                 best_exact = exact;
-                S_best = S;
-                memcpy(best, use, sizeof(int) * (size_t)P.n);
+                rt_copy(&S_best, &S, sizeof(S_best));
+                rt_copy(best, use, sizeof(int) * (size_t)P.n);
             }
         }
         if (best_n == P.n)      /* все точки согласны: больше не набрать, итог тот же */
@@ -401,8 +423,8 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
         /* согласны ровно все точки, кроме точек одного автора? - тогда суммы
            готовы: итог минус этот автор (частый случай: лжец в окне) */
         int in_k[RT_MAX_AUTHORS], all_k[RT_MAX_AUTHORS], k, out_k = -1, ok = 1;
-        memset(in_k, 0, sizeof(in_k));
-        memset(all_k, 0, sizeof(all_k));
+        rt_zero(in_k, sizeof(in_k));
+        rt_zero(all_k, sizeof(all_k));
         for (i = 0; i < P.n; i++) {
             for (k = 0; authors[k] != P.author[i]; k++)
                 ;
@@ -417,7 +439,7 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
         }
         if (ok && out_k >= 0) {
             int a, b;
-            S_best = total;
+            rt_copy(&S_best, &total, sizeof(S_best));
             for (a = 0; a < 3; a++)
                 for (b = 0; b < 3; b++) {
                     S_best.A[a][b] -= by_auth[out_k].A[a][b];
@@ -429,9 +451,9 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
     }
     if (best_exact) {
         /* суммы набора согласных точек уже готовы */
-        S = S_best;
+        rt_copy(&S, &S_best, sizeof(S));
     } else {
-        memset(&S, 0, sizeof(S));
+        rt_zero(&S, sizeof(S));
         for (i = 0; i < P.n; i++)
             if (best[i])
                 sums_add(&S, P.tau[i], P.p[i], 1.0);
@@ -446,7 +468,7 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
 
 static double dist3(const double *a, const double *b)
 {
-    return sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1])
+    return RT_SQRT((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1])
                 + (a[2] - b[2]) * (a[2] - b[2]));
 }
 
@@ -462,7 +484,7 @@ int rt_kin_gate(rt_context_t *ctx, int target, int author,
     if (!ctx || !claim || !mine)
         return RT_ERR_ARG;
     for (ax = 0; ax < 3; ax++) {
-        double d = fabs(claim[ax] - mine[ax]);
+        double d = RT_FABS(claim[ax] - mine[ax]);
         if (d > dmax)
             dmax = d;
     }
