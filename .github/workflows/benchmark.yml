@@ -40,11 +40,15 @@ jobs:
       - name: Install cross toolchains
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q gcc-aarch64-linux-gnu gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-user
+          sudo apt-get install -y -q gcc-aarch64-linux-gnu gcc-arm-none-eabi libnewlib-arm-none-eabi qemu-user qemu-system-arm
 
       - name: rt_core on aarch64 (tests under qemu), Cortex-M4, Cortex-M7
         working-directory: research/rt_core
         run: make embedded
+
+      - name: rt_core bare metal, no OS (qemu-system-arm mps2-an386 M4, mps2-an500 M7)
+        working-directory: research/rt_core
+        run: make baremetal
 
   python-tests:
     runs-on: ubuntu-latest

@@ -33,6 +33,9 @@ static inline void rt_copy(void *d, const void *s, size_t n)
 
 #define RT_FABS(x) __builtin_fabs(x)
 
+/* номер младшего установленного бита, x != 0 (Cortex-M: rbit + clz) */
+#define RT_CTZ32(x) __builtin_ctz((unsigned int)(x))
+
 /* sqrt по Ньютону: начальное приближение - половина показателя степени из
  * битов IEEE 754, затем 6 итераций (квадратичная сходимость, ~1 ulp).
  * x <= 0 -> 0; бесконечность и NaN возвращаются как есть. */

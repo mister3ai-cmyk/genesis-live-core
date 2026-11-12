@@ -164,13 +164,15 @@ double rt_kin_sums_check(const rt_context_t *ctx, int target)
 
 /* ------------------------------------------------------------ подгонка */
 
-typedef struct {
-    double tau[RT_RING];       /* секунды до момента прогноза (<= 0) */
-    double tau2[RT_RING];
-    double p[RT_RING][3];
-    int    author[RT_RING];
-    int    n;
-} pts_t;
+/* Точки окна не копируются: они читаются прямо из кольца, набор задаётся
+ * битовой маской по индексам кольца (S5.2: кадр стека rt_kin_predict был
+ * 4.6 КБ из-за копии окна и сумм по авторам). Порядок обхода и формулы те
+ * же, что у копии, поэтому результат совпадает бит в бит. */
+#if RT_RING > 32
+#error "маски окна - uint32_t: RT_RING <= 32"
+#endif
+typedef uint32_t rt_mask_t;
+#define RT_BIT(i) ((rt_mask_t)1u << (i))
 
 /* Решение m x m (m <= 3) с тремя правыми частями методом Гаусса с выбором
  * главного элемента. A и B портятся. 0 - вырождена. */
@@ -209,10 +211,11 @@ static int solve3(int m, double A[3][3], double B[3][3], double X[3][3])
     return 1;
 }
 
-/* Суммы нормальных уравнений многочлена 2-й степени: A[a][b] = sum tau^(a+b),
- * B[a][ax] = sum tau^a p_ax. Для 1-й степени берётся левый верхний угол 2 x 2. */
+/* Суммы нормальных уравнений многочлена 2-й степени: T[k] = sum tau^k
+ * (матрица A[a][b] = T[a + b] - ганкелева, хранится 5 чисел вместо 9),
+ * B[a][ax] = sum tau^a p_ax. Для 1-й степени берётся левый верхний угол. */
 typedef struct {
-    double A[3][3], B[3][3];
+    double T[5], B[3][3];
     int    n;
 } sums_t;
 
@@ -223,57 +226,102 @@ static void sums_add(sums_t *S, double tau, const double *p, double sign)
     pw[0] = 1.0;
     pw[1] = tau;
     pw[2] = tau * tau;
-    for (a = 0; a < 3; a++) {
-        for (b = 0; b < 3; b++)
-            S->A[a][b] += sign * pw[a] * pw[b];
+    /* те же произведения, что у полной матрицы: (sign * pw[a]) * pw[b] */
+    S->T[0] += sign * pw[0] * pw[0];
+    S->T[1] += sign * pw[0] * pw[1];
+    S->T[2] += sign * pw[0] * pw[2];
+    S->T[3] += sign * pw[1] * pw[2];
+    S->T[4] += sign * pw[2] * pw[2];
+    for (a = 0; a < 3; a++)
         for (b = 0; b < 3; b++)
             S->B[a][b] += sign * pw[a] * p[b];
-    }
     S->n += sign > 0 ? 1 : -1;
 }
 
-/* Сдвиг сумм из локального времени кольца s к tau = s - s_q:
- * sum tau^m = sum_j C(m, j) S_j (-s_q)^(m-j); то же для B. */
-static void shift(const rt_sums_t *R, double s_q, sums_t *out)
+static void sums_sub(sums_t *S, const sums_t *X)
 {
-    static const double C[5][5] = {{1, 0, 0, 0, 0}, {1, 1, 0, 0, 0}, {1, 2, 1, 0, 0},
-                                   {1, 3, 3, 1, 0}, {1, 4, 6, 4, 1}};
-    double pw[5], T[5], U[3][3];
-    int m, j, ax;
+    int k, ax;
+    for (k = 0; k < 5; k++)
+        S->T[k] -= X->T[k];
+    for (k = 0; k < 3; k++)
+        for (ax = 0; ax < 3; ax++)
+            S->B[k][ax] -= X->B[k][ax];
+    S->n -= X->n;
+}
+
+/* Степени (-s_q)^k, k = 0..4: общие для всех сдвигов одного прогноза. */
+static void shift_pows(double s_q, double pw[5])
+{
+    int m;
     pw[0] = 1.0;
     for (m = 1; m < 5; m++)
         pw[m] = pw[m - 1] * -s_q;
+}
+
+/* Сдвиг сумм из локального времени кольца s к tau = s - s_q:
+ * sum tau^m = sum_j C(m, j) S_j (-s_q)^(m-j); то же для B. pw - shift_pows. */
+static void shift(const rt_sums_t *R, const double pw[5], sums_t *out)
+{
+    static const double C[5][5] = {{1, 0, 0, 0, 0}, {1, 1, 0, 0, 0}, {1, 2, 1, 0, 0},
+                                   {1, 3, 3, 1, 0}, {1, 4, 6, 4, 1}};
+    int m, j, ax;
     for (m = 0; m < 5; m++) {
-        T[m] = 0.0;
+        out->T[m] = 0.0;
         for (j = 0; j <= m; j++)
-            T[m] += C[m][j] * R->S[j] * pw[m - j];
+            out->T[m] += C[m][j] * R->S[j] * pw[m - j];
     }
     for (m = 0; m < 3; m++)
         for (ax = 0; ax < 3; ax++) {
-            U[m][ax] = 0.0;
+            out->B[m][ax] = 0.0;
             for (j = 0; j <= m; j++)
-                U[m][ax] += C[m][j] * R->B[j][ax] * pw[m - j];
+                out->B[m][ax] += C[m][j] * R->B[j][ax] * pw[m - j];
         }
-    for (m = 0; m < 3; m++) {
-        for (j = 0; j < 3; j++)
-            out->A[m][j] = T[m + j];
-        for (ax = 0; ax < 3; ax++)
-            out->B[m][ax] = U[m][ax];
-    }
     out->n = R->n;
+}
+
+/* Суммы автора a в окне: веденные при записи минус его точки вне окна
+ * (маска out - только точки автора a, обычно 0-2), со сдвигом к моменту
+ * прогноза. Биты обходятся по возрастанию - порядок сложения как у копии. */
+static void author_sums(const rt_ring_t *r, int a, rt_mask_t out, const double pw[5], sums_t *res)
+{
+    rt_sums_t w, x;
+    int k, ax;
+    if (!out) {                           /* частый случай: вычитать нечего */
+        shift(&r->sums[a], pw, res);
+        return;
+    }
+    rt_zero(&x, sizeof(x));
+    for (; out; out &= out - 1) {
+        const rt_obs_t *o = &r->obs[RT_CTZ32(out)];
+        raw_add(&x, loc_s(r, o->t_us), o->p, 1.0);
+    }
+    for (k = 0; k < 5; k++)
+        w.S[k] = r->sums[a].S[k] - x.S[k];
+    for (k = 0; k < 3; k++)
+        for (ax = 0; ax < 3; ax++)
+            w.B[k][ax] = r->sums[a].B[k][ax] - x.B[k][ax];
+    w.n = r->sums[a].n - x.n;
+    shift(&w, pw, res);
 }
 
 /* Подгонка по готовым суммам; степень по числу точек. 0 - не удалось. */
 static int fit_sums(const sums_t *S, double coef[3][3], int *deg)
 {
     double A[3][3], B[3][3];
-    int m;
+    int m, a, b;
     *deg = S->n >= 6 ? 2 : 1;
     m = *deg + 1;
-    rt_copy(A, S->A, sizeof(A));
+    for (a = 0; a < 3; a++)
+        for (b = 0; b < 3; b++)
+            A[a][b] = S->T[a + b];
     rt_copy(B, S->B, sizeof(B));
     rt_zero(coef, sizeof(double) * 9);
     return solve3(m, A, B, coef);
+}
+
+static double tau_of(const rt_obs_t *o, int64_t t_us)
+{
+    return (double)(o->t_us - t_us) / 1e6;
 }
 
 /* Точка согласна с подгонкой: квадрат невязки <= tol2. У подгонки 1-й
@@ -292,16 +340,15 @@ static int agrees(double coef[3][3], double tau, double tau2, const double *p, d
     return 1;
 }
 
-static int usable(const pts_t *P, const int *use, int min_pts)
+static int usable(const rt_ring_t *r, rt_mask_t use, int min_pts)
 {
-    int i, n = 0, first = -1, two = 0;
-    for (i = 0; i < P->n; i++) {
-        if (!use[i])
-            continue;
+    int n = 0, first = -1, two = 0;
+    for (; use; use &= use - 1) {
+        int a = r->obs[RT_CTZ32(use)].author;
         n++;
         if (first < 0)
-            first = P->author[i];
-        else if (P->author[i] != first)
+            first = a;
+        else if (a != first)
             two = 1;
     }
     return n >= min_pts && two;
@@ -311,86 +358,58 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
                    int exclude_author, double out[3])
 {
     const rt_ring_t *r;
-    pts_t P;
-    int use[RT_RING], best[RT_RING];
-    int authors[RT_MAX_AUTHORS], n_auth = 0;
-    int i, s, best_n = -1, best_exact = 0, deg;
-    double coef[3][3], tol2, s_q;
-    sums_t total, by_auth[RT_MAX_AUTHORS], S, S_best;
-    rt_sums_t outside[RT_MAX_AUTHORS];
+    rt_mask_t win = 0, outside[RT_MAX_AUTHORS], use, best = 0, m;
+    int authors[RT_MAX_AUTHORS], n_auth = 0, n_pts = 0;
+    int i, s, best_n = -1, best_exact = 0, best_s = -2, deg;
+    double coef[3][3], tol2, pw[5];
+    sums_t total, S, X;
     if (!ctx || !out || target < 0 || target >= RT_MAX_TARGETS)
         return RT_ERR_ARG;
     r = &ctx->ring[target];
-    P.n = 0;
     rt_zero(outside, sizeof(outside));
     for (i = 0; i < r->count; i++) {
         const rt_obs_t *o = &r->obs[i];
         if (o->author == exclude_author)
             continue;
         if (o->t_us >= t_us || o->t_us < t_us - ctx->cfg.horizon_us) {
-            /* вне окна: вычесть из сумм автора при сдвиге (обычно 0-2 точки) */
-            raw_add(&outside[o->author], loc_s(r, o->t_us), o->p, 1.0);
+            outside[o->author] |= RT_BIT(i);   /* вне окна: вычесть из сумм автора */
             continue;
         }
-        P.tau[P.n] = (double)(o->t_us - t_us) / 1e6;
-        P.tau2[P.n] = P.tau[P.n] * P.tau[P.n];
-        P.p[P.n][0] = o->p[0];
-        P.p[P.n][1] = o->p[1];
-        P.p[P.n][2] = o->p[2];
-        P.author[P.n] = o->author;
-        P.n++;
+        win |= RT_BIT(i);
+        n_pts++;
     }
-    for (i = 0; i < P.n; i++)
-        use[i] = 1;
-    if (!usable(&P, use, ctx->cfg.min_pts))
+    if (!usable(r, win, ctx->cfg.min_pts))
         return RT_NO_PRED;
-    for (i = 0; i < P.n; i++) {
-        int a = P.author[i], k, seen = 0;
+    for (m = win; m; m &= m - 1) {
+        int a = r->obs[RT_CTZ32(m)].author, k, seen = 0;
         for (k = 0; k < n_auth; k++)
             seen |= authors[k] == a;
         if (!seen)
             authors[n_auth++] = a;
     }
-    /* суммы автора в окне = суммы, веденные при записи, минус точки вне
-       окна; сдвиг из локального времени кольца к tau = s - s_q. Кандидат
-       «без автора a» = итог - суммы a: O(авторов), а не O(точек) */
+    /* итог = сумма сумм авторов в окне; кандидат «без автора a» = итог -
+       суммы a: O(авторов), а не O(точек). Суммы автора пересчитываются из
+       кольца, а не хранятся (стек) - те же операции, тот же результат */
     rt_zero(&total, sizeof(total));
-    s_q = loc_s(r, t_us);
+    shift_pows(loc_s(r, t_us), pw);
     for (s = 0; s < n_auth; s++) {
-        rt_sums_t w;
-        const rt_sums_t *x = &outside[authors[s]];
         int k, ax;
-        rt_copy(&w, &r->sums[authors[s]], sizeof(w));
+        author_sums(r, authors[s], outside[authors[s]], pw, &X);
         for (k = 0; k < 5; k++)
-            w.S[k] -= x->S[k];
+            total.T[k] += X.T[k];
         for (k = 0; k < 3; k++)
             for (ax = 0; ax < 3; ax++)
-                w.B[k][ax] -= x->B[k][ax];
-        w.n -= x->n;
-        shift(&w, s_q, &by_auth[s]);
-    }
-    for (s = 0; s < n_auth; s++) {
-        int a, b;
-        for (a = 0; a < 3; a++)
-            for (b = 0; b < 3; b++) {
-                total.A[a][b] += by_auth[s].A[a][b];
-                total.B[a][b] += by_auth[s].B[a][b];
-            }
-        total.n += by_auth[s].n;
+                total.B[k][ax] += X.B[k][ax];
+        total.n += X.n;
     }
     tol2 = ctx->cfg.drop_tol * ctx->cfg.drop_tol;
     /* кандидаты: s = -1 - все авторы; s >= 0 - все, кроме authors[s] */
     for (s = -1; s < (n_auth > 2 ? n_auth : 0); s++) {
-        int n_in = 0;
+        int n_in = 0, j = 0;
         rt_copy(&S, &total, sizeof(S));
         if (s >= 0) {
-            int a, b;
-            for (a = 0; a < 3; a++)
-                for (b = 0; b < 3; b++) {
-                    S.A[a][b] -= by_auth[s].A[a][b];
-                    S.B[a][b] -= by_auth[s].B[a][b];
-                }
-            S.n -= by_auth[s].n;
+            author_sums(r, authors[s], outside[authors[s]], pw, &X);
+            sums_sub(&S, &X);
         }
         /* годность кандидата по счётчикам: точек >= min_pts, авторов >= 2
            (без одного из > 2 авторов их остаётся >= 2) */
@@ -398,26 +417,31 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
             continue;
         {
             int exact = 1, beaten = 0, skip = s < 0 ? -1 : authors[s];
-            for (i = 0; i < P.n; i++) {
-                use[i] = agrees(coef, P.tau[i], P.tau2[i], P.p[i], tol2);
-                n_in += use[i];
-                exact &= use[i] == (P.author[i] != skip);
-                if (n_in + (P.n - i - 1) <= best_n) {   /* лучшего уже не превзойти */
+            use = 0;
+            for (m = win; m; m &= m - 1) {
+                const rt_obs_t *o = &r->obs[RT_CTZ32(m)];
+                double tau = tau_of(o, t_us);
+                int ok = agrees(coef, tau, tau * tau, o->p, tol2);
+                use |= ok ? (m & (~m + 1)) : 0;  /* младший бит m - эта точка */
+                n_in += ok;
+                exact &= ok == (o->author != skip);
+                if (n_in + (n_pts - j - 1) <= best_n) {   /* лучшего уже не превзойти */
                     beaten = 1;
                     break;
                 }
+                j++;
             }
             if (!beaten && n_in > best_n) {
                 best_n = n_in;
                 best_exact = exact;
-                rt_copy(&S_best, &S, sizeof(S_best));
-                rt_copy(best, use, sizeof(int) * (size_t)P.n);
+                best_s = s;                   /* суммы кандидата восстановимы по s */
+                best = use;
             }
         }
-        if (best_n == P.n)      /* все точки согласны: больше не набрать, итог тот же */
+        if (best_n == n_pts)    /* все точки согласны: больше не набрать, итог тот же */
             break;
     }
-    if (best_n < 0 || !usable(&P, best, ctx->cfg.min_pts))
+    if (best_n < 0 || !usable(r, best, ctx->cfg.min_pts))
         return RT_NO_PRED;
     if (!best_exact) {
         /* согласны ровно все точки, кроме точек одного автора? - тогда суммы
@@ -425,11 +449,12 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
         int in_k[RT_MAX_AUTHORS], all_k[RT_MAX_AUTHORS], k, out_k = -1, ok = 1;
         rt_zero(in_k, sizeof(in_k));
         rt_zero(all_k, sizeof(all_k));
-        for (i = 0; i < P.n; i++) {
-            for (k = 0; authors[k] != P.author[i]; k++)
+        for (m = win; m; m &= m - 1) {
+            i = RT_CTZ32(m);
+            for (k = 0; authors[k] != r->obs[i].author; k++)
                 ;
             all_k[k]++;
-            in_k[k] += best[i];
+            in_k[k] += (best & RT_BIT(i)) != 0;
         }
         for (k = 0; k < n_auth && ok; k++) {
             if (in_k[k] == 0 && out_k < 0)
@@ -438,25 +463,23 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
                 ok = 0;
         }
         if (ok && out_k >= 0) {
-            int a, b;
-            rt_copy(&S_best, &total, sizeof(S_best));
-            for (a = 0; a < 3; a++)
-                for (b = 0; b < 3; b++) {
-                    S_best.A[a][b] -= by_auth[out_k].A[a][b];
-                    S_best.B[a][b] -= by_auth[out_k].B[a][b];
-                }
-            S_best.n -= by_auth[out_k].n;
+            best_s = out_k;
             best_exact = 1;
         }
     }
     if (best_exact) {
-        /* суммы набора согласных точек уже готовы */
-        rt_copy(&S, &S_best, sizeof(S));
+        /* суммы набора согласных точек: итог или итог минус один автор */
+        rt_copy(&S, &total, sizeof(S));
+        if (best_s >= 0) {
+            author_sums(r, authors[best_s], outside[authors[best_s]], pw, &X);
+            sums_sub(&S, &X);
+        }
     } else {
         rt_zero(&S, sizeof(S));
-        for (i = 0; i < P.n; i++)
-            if (best[i])
-                sums_add(&S, P.tau[i], P.p[i], 1.0);
+        for (m = best; m; m &= m - 1) {
+            const rt_obs_t *o = &r->obs[RT_CTZ32(m)];
+            sums_add(&S, tau_of(o, t_us), o->p, 1.0);
+        }
     }
     if (!fit_sums(&S, coef, &deg))
         return RT_NO_PRED;
