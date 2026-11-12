@@ -32,7 +32,29 @@ def load(path=None):
     lib.rt_gr_orth_mgs.argtypes = [I, I, DP, DP]
     lib.rt_gr_chordal2.argtypes = [I, I, DP, DP]
     lib.rt_gr_chordal2.restype = D
+    lib.rt_xcorr_delay.argtypes = [DP, DP, I, I, D, DP, DP]
+    lib.rt_xcorr_delay_multi.argtypes = [DP, DP, I, I, I, D, DP, DP]
     return lib
+
+
+ERR_LOW_EXCITATION = -4
+
+
+def xcorr(lib, a, b, max_lag, min_var):
+    """(код, задержка b относительно a в отсчётах, пик корреляции).
+    a, b - (n,) или (n, каналы)."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if a.ndim == 1:
+        a, b = a[:, None], b[:, None]
+    n, ch = a.shape
+    ac = np.ascontiguousarray(a.T).ravel()            # каналы подряд
+    bc = np.ascontiguousarray(b.T).ravel()
+    lag, peak = ctypes.c_double(0.0), ctypes.c_double(0.0)
+    p = ctypes.POINTER(ctypes.c_double)
+    rc = lib.rt_xcorr_delay_multi(ac.ctypes.data_as(p), bc.ctypes.data_as(p), n, ch, max_lag, min_var,
+                                  ctypes.byref(lag), ctypes.byref(peak))
+    return rc, lag.value, peak.value
 
 
 def _vec(x, n=3):
