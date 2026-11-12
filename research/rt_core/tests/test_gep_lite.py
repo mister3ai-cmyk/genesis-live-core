@@ -91,11 +91,131 @@ def test_replay_and_future_timestamp():
     assert n.receive(_claim(1, 6, 900_000), "s1", 1_000_300)[0] == "pass"       # задержка доставки - норма
     assert n.receive(_claim(1, 200, 900_000), "s1", 1_000_300)[0] == "pass"
     assert n.receive(_claim(1, 100, 900_000), "s1", 1_000_300)[0] == "replay"   # старше окна 64
-    assert n.receive(_claim(2, 1, 1_100_000), "s2", 1_000_000)[0] == "quarantine_future"
-    assert n.q_authors == {2: 3}
-    assert n.receive(_claim(2, 2, 1_000_000), "s2", 1_000_000)[0] == "drop_quarantined"
+    # метка из будущего: кадр отброшен, карантин - только после льготного окна
+    assert n.receive(_claim(2, 1, 1_100_000), "s2", 1_000_000)[0] == "future_drop"
+    assert n.q_authors == {}
+    assert n.receive(_claim(2, 2, 6_100_000), "s2", 6_000_000)[0] == "quarantine_future"
+    assert n.q_authors == {2: gl.REASON_FUTURE}
+    assert n.receive(_claim(2, 3, 6_000_000), "s2", 6_000_000)[0] == "drop_quarantined"
     tomb = gl.unpack(n.tombs[0][0], PUB)
     assert tomb["type"] == gl.TOMBSTONE and tomb["payload"][0] == 2
+
+
+def test_future_strike_resets_when_author_recovers_and_needs_my_lock():
+    n = gl.Node(0, KEYS[0][0], PUB, max_skew_us=50_000)
+    assert n.receive(_claim(2, 1, 1_100_000), "s2", 1_000_000)[0] == "future_drop"
+    assert n.receive(_claim(2, 2, 3_000_000), "s2", 3_000_000)[0] == "pass"    # выправился
+    assert n.receive(_claim(2, 3, 7_100_000), "s2", 7_000_000)[0] == "future_drop"  # счёт заново
+    cs = gl.ClockSync(0, range(6))                            # мои часы не синхронизированы
+    m = gl.Node(0, KEYS[0][0], PUB, clock=cs)
+    assert m.receive(_claim(2, 1, 1_100_000), "s2", 1_000_000)[0] == "future_drop"
+    assert m.receive(_claim(2, 2, 9_100_000), "s2", 9_000_000)[0] == "future_drop"
+    assert m.q_authors == {}                                  # «будущее» может быть мной
+
+
+# --- SYNC_PING / PONG -------------------------------------------------------
+
+def test_ntp_four_timestamps():
+    off, d_go, d_back, proc = 37_000, 4_000, 26_000, 300      # сосед впереди на 37 мс
+    t1 = 1_000_000
+    t2 = t1 + d_go + off
+    t3 = t2 + proc
+    t4 = t3 - off + d_back
+    delta, theta = gl.ntp(t1, t2, t3, t4)
+    assert delta == d_go + d_back
+    assert theta == off + (d_go - d_back) / 2                 # ошибка - половина асимметрии
+    assert gl.ntp(t1, t1 + 5_000 + off, t1 + 5_000 + off, t1 + 10_000)[1] == off
+
+
+def _simulate(my_off_us, liars=(), lie_us=1_000_000, dur_us=3_000_000, seed=0):
+    """Я (узел 0) и 6 соседей; истинное время T, мои сырые часы T + my_off.
+    Задержка в каждую сторону 5-30 мс. Лжецы подставляют t2/t3 со сдвигом."""
+    import heapq
+    import random
+    rnd = random.Random(seed)
+    cs = gl.ClockSync(0, range(7))
+    ev, k, T = [], 0, 0
+    while T < dur_us:
+        for p in cs.pings_due(cs.now(T + my_off_us)):
+            t1 = cs.out[p]
+            d1, d2 = rnd.uniform(5e3, 30e3), rnd.uniform(5e3, 30e3)
+            sh = lie_us if p in liars else 0
+            t2 = int(T + d1) + sh
+            heapq.heappush(ev, (T + d1 + d2, k, p, t1, t2, t2 + 100))
+            k += 1
+        while ev and ev[0][0] <= T:
+            ta, _, p, t1, t2, t3 = heapq.heappop(ev)
+            cs.on_pong(p, t1, t2, t3, cs.now(ta + my_off_us))
+        T += 1_000
+    return cs
+
+
+@pytest.mark.parametrize("my_off", [-200_000, 200_000])
+def test_clock_sync_aligns_within_two_seconds(my_off):
+    cs = _simulate(my_off, dur_us=2_000_000)
+    assert cs.locked
+    assert abs(cs.offset_us + my_off) < 10_000                # остаток < 10 мс
+    assert cs.corrections and cs.corrections[0][1] * my_off < 0
+
+
+@pytest.mark.parametrize("liars", [(1,), (1, 2)])
+def test_clock_sync_ignores_byzantine_minority(liars):
+    clean = _simulate(0, dur_us=3_000_000)
+    for lie in (1_000_000, -1_000_000):
+        cs = _simulate(0, liars=liars, lie_us=lie, dur_us=3_000_000)
+        assert abs(cs.offset_us - clean.offset_us) < 10_000 and abs(cs.offset_us) < 10_000
+        cs = _simulate(-200_000, liars=liars, lie_us=lie, dur_us=3_000_000)
+        assert abs(cs.offset_us - 200_000) < 10_000
+
+
+def test_pong_rate_limit_and_echo_check():
+    cs = gl.ClockSync(0, range(4), pong_per_s=2)
+    assert [cs.allow_pong(1, t) for t in (0, 100, 200, 1_000_150)] == [True, True, False, True]
+    assert cs.allow_pong(2, 200)                              # у каждого соседа свой лимит
+    cs.pings_due(5_000)                                       # PING всем соседям, t1 = 5000
+    assert not cs.on_pong(1, 4_999, 6_000, 6_000, 7_000)      # чужое эхо t1
+    assert cs.on_pong(1, 5_000, 6_000, 6_000, 7_000)
+    assert not cs.on_pong(1, 5_000, 6_000, 6_000, 7_000)      # повтор того же ответа
+
+
+def test_sync_frames_bypass_future_check_and_reply():
+    ca, cb = gl.ClockSync(0, range(3)), gl.ClockSync(1, range(3), pong_per_s=2)
+    a = gl.Node(0, KEYS[0][0], PUB, clock=ca)
+    b = gl.Node(1, KEYS[1][0], PUB, clock=cb)
+    pings = a.pings(1_000_000)
+    assert len(pings) == 2 and all(len(p) == 102 for p in pings)
+    to_b = [p for p in pings if gl.unpack(p, PUB)["target"] == 1][0]
+    # часы b впереди на 0.4 с - PING для b «из прошлого», ответ для a «из будущего»
+    r, pong = b.receive(to_b, "a", 1_410_000)
+    assert r == "ping_in" and pong is not None
+    f = gl.unpack(pong, PUB)
+    assert f["flags"] & gl.FLAG_PONG and f["payload"] == (1_000_000, 1_410_000)
+    assert a.receive(pong, "b", 1_020_000)[0] == "pong_in"    # не quarantine_future
+    assert a.q_authors == {} and ca.samples[1] == [(20_000, 400_000.0)]
+    c = gl.Node(2, KEYS[2][0], PUB, clock=gl.ClockSync(2, range(3)))
+    assert c.receive(pong, "b", 1_020_000)[0] == "sync_other"  # адресован не мне
+    ping = lambda s, t: gl.pack(KEYS[0][0], gl.SYNC_PING, 0, 1, s, t, t, 0)
+    res = [b.receive(ping(100 + i, t), "a", t)[0] for i, t in enumerate((1_420_000, 1_430_000))]
+    assert res == ["ping_in", "ping_flood"]                   # третий PING за секунду - флуд
+    assert b.receive(ping(200, 2_420_000), "a", 2_420_000)[0] == "ping_in"   # окно сдвинулось
+    # групповой PING: один кадр, отвечают все; PONG с target = BCAST не принимается
+    g = a.pings(2_000_000, group=True)
+    assert len(g) == 1 and gl.unpack(g[0], PUB)["target"] == gl.BCAST
+    assert a.pings(2_100_000, group=True) == []               # срок ещё не подошёл
+    assert c.receive(g[0], "a", 2_010_000)[0] == "ping_in"
+    fake = gl.pack(KEYS[1][0], gl.SYNC_PING, 1, gl.BCAST, 300, 2_020_000, 2_000_000, 2_010_000,
+                   flags=gl.FLAG_PONG)
+    assert a.receive(fake, "b", 2_030_000)[0] == "sync_other"
+
+
+def test_unsynced_node_does_not_judge():
+    rt_core, lib = _lib()
+    cs = gl.ClockSync(0, range(6))
+    n = gl.Node(0, KEYS[0][0], PUB, kin=rt_core.Kin(lib), clock=cs)
+    far = lambda tg, t: (1e3, 1e3, 1e3)                      # «мой датчик» с другого конца света
+    for s in range(1, 20):
+        assert n.receive(_claim(1, s, s * 40_000), "s1", s * 40_000 + 5_000, mine=far)[0] == "unsynced"
+    assert n.q_authors == {}
 
 
 def test_tomb_backoff_per_peer():
