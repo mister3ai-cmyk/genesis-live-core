@@ -43,6 +43,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 import swarm_net as net
 import swarm_wire as wire
 from apsa_engine import APSASanitaryAudit, INTENTIONAL
+import kinematics as kin
 import marzullo as mz
 from tombstone_registry import TombstoneRegistry
 
@@ -52,6 +53,7 @@ N_SECTORS = 16
 N_TARGETS = 4
 ATTACK_START_MS = 60_000
 # v3 (Шаг 3): окно источников, полуширина измерения и запас на движение цели
+TRAJ_THR = 800                  # v4.0: порог невязки кинематического шлюза (этап B)
 MZ_W_MS = 1_000                 # заявки других авторов ближе 1 с к событию
 MZ_H = 150                      # ±3σ шума ±50 у автора и у измерения, с запасом
 MZ_D = 1_600                    # истина меняется шагами до 1 500 по оси
@@ -456,7 +458,8 @@ class Node:
         self.pubs = {k.author: k.pub for k in self.keys}
         self.idx_of = {k.author: i for i, k in enumerate(self.keys)}
         self.rng = random.Random("node:%s:%d" % (seed, idx))
-        drift = random.Random("drift:%s:%d" % (seed, idx)).randint(-2000, 2000)
+        dm = cfg.get("drift_max_ms", 2000)     # v4.0: мир kinematic - время GNSS, +-20 мс
+        drift = random.Random("drift:%s:%d" % (seed, idx)).randint(-dm, dm)
         if cfg.get("drifts") is not None:
             drift = cfg["drifts"][idx]
         self.hlc = HLC(drift)
@@ -555,6 +558,17 @@ class Node:
         self.vmeas = {}             # eid -> {голосующий: измерение}
         self.mz_cache = {}          # eid -> (версия данных, решение)
         self.mz_suppressed = 0      # не опроверг: в меньшинстве мой датчик
+        self.traj_gate = bool(cfg.get("traj_gate", False))   # v4.0
+        self.traj_cache = {}        # eid -> (версия данных, решение)
+        self.traj_checks = 0        # мой датчик против заявки, прогноз посчитан
+        self.traj_veto = 0          # прогноз за мой датчик: опровергаю
+        self.traj_veto_bad = 0      # ...а заявка была верна в свой момент (ошибка шлюза)
+        # v4.0: мир kinematic - ложность опровержения по истине в момент события
+        self.point_truth = cfg.get("world") == "kinematic"
+        # v4.0 (вектор B): надгробия в PULL - не в каждом ответе, а с отступом
+        # 1, 2, 4 ... 30 с на соседа (до этого шли в каждый ответ весь прогон)
+        self.tomb_backoff = bool(cfg.get("tomb_backoff", False))
+        self.tomb_sent = {}         # (сосед, eid) -> (следующий раз, мс; интервал, мс)
         self.false_ref = {"pos": 0, "status": 0}   # инструментовка: опровергнута правда
         if self.anis:
             self.slash = True
@@ -1063,6 +1077,12 @@ class Node:
                 # мой датчик против согласия остальных источников - сбой мой
                 self.mz_suppressed += 1
                 ok = None
+            if ok is not False and self.traj_gate and ev.key.endswith(".pos") \
+                    and self.sensor.model == "interval" and self._traj_refutes(ev):
+                self.traj_veto += 1
+                if self._claim_true(ev):
+                    self.traj_veto_bad += 1
+                ok = False
             if ok is None:
                 pass
             elif ok:
@@ -1088,6 +1108,49 @@ class Node:
         if nb >= 5 and nb >= 0.25 * len(q):
             gap = self.liar_gap if self.liar_gap is not None else self.tomb_gap // 2
             self.bury("lie", a, nb / len(q), gap, self.kin_n.get(a, 0))
+
+    def _claim_true(self, ev):
+        """v4.0, учёт: заявка верна в свой момент (истина +- POS_TOL; статус -
+        совпадает). Окно +-5 с датчика для движущейся цели засчитывало ложь T8
+        как правду (SWARM_FINDINGS, Часть XI, A6 п. 3)."""
+        tv = truth_at(self.truth, ev.key, ev.hlc[0])
+        if not ev.key.endswith(".pos"):
+            return ev.value == tv
+        try:
+            return max(abs(ev.value[0] - tv[0]), abs(ev.value[1] - tv[1])) <= Sensor.POS_TOL
+        except (TypeError, IndexError):
+            return False
+
+    def _traj_refutes(self, ev):
+        """v4.0, шлюз --traj-gate: опровергнуть, только если мой датчик
+        расходится с заявкой больше POS_TOL, а кинематический прогноз по
+        заявкам других авторов (kinematics.predict) согласен с моим датчиком
+        (невязка <= TRAJ_THR) и не согласен с заявкой (> TRAJ_THR). Если и мой
+        датчик далёк от прогноза (свой грубый сбой) или прогноза нет -
+        решения нет, работает v3.1."""
+        my = self.sensor.reading(ev.key, ev.value, ev.hlc[0])
+        try:
+            if max(abs(ev.value[0] - my[0]), abs(ev.value[1] - my[1])) <= Sensor.POS_TOL:
+                return False
+        except (TypeError, IndexError):
+            return False
+        lst = self.claims.get(ev.key, ())
+        ver = (len(lst), len(self.slashed), len(self.tombs.suspect))
+        hit = self.traj_cache.get(ev.eid)
+        if hit is not None and hit[0] == ver:
+            return hit[1]
+        t, a = ev.hlc[0], ev.author
+        cl = [(l, b, val) for (l, c, b, eid, val) in lst[bisect_left(lst, (t - kin.HORIZON_MS,)):]
+              if l < t and b != a and b not in self.slashed and not self.tombs.is_suspect(b)
+              and isinstance(val, list)]
+        pred = kin.predict(cl, t)
+        res = False
+        if pred is not None:
+            self.traj_checks += 1
+            res = (kin.residual(ev.value, pred) > TRAJ_THR
+                   and kin.residual(my, pred) <= TRAJ_THR)
+        self.traj_cache[ev.eid] = (ver, res)
+        return res
 
     def kinematic_check(self, ev, now_ms):
         """T4: скачок координаты цели против прежнего победителя слота."""
@@ -1120,7 +1183,8 @@ class Node:
             else:
                 note = self.sensor.reading(ev.key, ev.value, ev.hlc[0])
         if (verdict == "refuted" and not self.is_attacker
-                and self.sensor._check(ev.key, ev.value, ev.hlc[0], now_ms)):
+                and (self._claim_true(ev) if self.point_truth
+                     else self.sensor._check(ev.key, ev.value, ev.hlc[0], now_ms))):
             self.false_ref["pos" if ev.key.endswith(".pos") else "status"] += 1
         body = {"glyph_hash": ev.eid, "verdict": verdict,
                 "evidence": {"applied_in": "sensor:" + ev.key, "note": note},
@@ -1182,6 +1246,15 @@ class Node:
         if "T6" in a and t_ms >= self.revoke_at:
             ev = self.gen_own(t_ms, key, value, tag, label="T6")
             self.attack_log.append(("T6", ev.eid[7:23], key, ev.vh, t_ms))
+            return
+        if "T8" in a and t_ms >= ATTACK_START_MS and is_shared(key) and key.endswith(".pos"):
+            # v4.0: адаптивная ложь - сдвиг 600-1500 по оси, внутри допуска
+            # Марзулло (источник +-MZ_H+MZ_D), но вне допуска датчика (POS_TOL)
+            tv = truth_at(self.truth, key, t_ms)
+            value = [tv[i] + self.lie_rng.choice((-1, 1)) * self.lie_rng.randint(600, 1500)
+                     for i in (0, 1)]
+            ev = self.gen_own(t_ms, key, value, None, label="T8")
+            self.attack_log.append(("T8", ev.eid[7:23], key, ev.vh, t_ms))
             return
         if "T4" in a and t_ms >= ATTACK_START_MS and is_shared(key):
             r = self.lie(key, t_ms)
@@ -1561,7 +1634,7 @@ class Node:
         if a >= self.n or not verify_raw(self.keys[a].pub, g["sig"], g["signed"]):
             self.reject("digest")
             return []
-        return self.answer_body(g["body"])
+        return self.answer_body(g["body"], a)
 
     # ------------------------------------------------------------ PULL
 
@@ -1589,10 +1662,21 @@ class Node:
         if check_env(env, self.pubs):
             self.reject("digest")
             return []
-        return self.answer_body(env["body"])
+        return self.answer_body(env["body"], self.idx_of.get(env.get("author")))
 
-    def answer_body(self, body):
-        out = list(self.tomb_events)
+    def _tombs_for(self, peer):
+        if not self.tomb_backoff or peer is None:
+            return list(self.tomb_events)
+        out = []
+        for ev in self.tomb_events:
+            nxt, gap = self.tomb_sent.get((peer, ev.eid), (0, 1000))
+            if self.clock >= nxt:
+                out.append(ev)
+                self.tomb_sent[(peer, ev.eid)] = (self.clock + gap, min(2 * gap, 30_000))
+        return out
+
+    def answer_body(self, body, peer=None):
+        out = self._tombs_for(peer)
         for ke in self.key_events:
             if self.idx_of[ke.env["body"]["key"]] not in body.get("rev", []):
                 out.append(ke)
@@ -1954,6 +2038,8 @@ def run_node(cfg, idx, barrier, counts, q):
         "thymus_blocked": node.tombs.blocked if node.anis else 0,
         "fast_sent": node.fast_sent,
         "mz_suppressed": node.mz_suppressed,
+        "traj_checks": node.traj_checks, "traj_veto": node.traj_veto,
+        "traj_veto_bad": node.traj_veto_bad,
         "false_ref": node.false_ref,
         "tombs": [[e.author, e.env["body"]["target"], e.env["body"].get("src"), e.env["body"].get("s"), e.arrival]
                   for e in node.tomb_events if e.author == idx],

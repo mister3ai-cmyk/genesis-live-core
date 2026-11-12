@@ -1096,3 +1096,117 @@ def test_v31_slot_dispute_sends_only_missing_votes_on_both_disputed_events():
     r0 = _slot_dispute(False)[0]                    # v3.0: только победитель
     out = {ev.eid for ev in r0.answer_body({"sl": sl, "vv": full})}
     assert e2.eid in out and not (votes & out)
+
+
+# v4.0 ---------------------------------------------------------------------
+
+def test_v40_default_world_is_the_old_steps_world():
+    a = sim.build_world(3, 5, 60_000)
+    b = sim.build_world(3, 5, 60_000, world="steps")
+    assert a == b
+
+
+def test_v40_kinematic_world_moves_targets_smoothly():
+    w = sim.build_world(1, 5, 120_000, world="kinematic")
+    for k in sn.shared_keys():
+        times, vals = w["truth"][k]
+        if k.endswith(".pos"):
+            assert times[0] == 0 and all(b - a == 100 for a, b in zip(times, times[1:]))
+            steps = [max(abs(q[0] - p[0]), abs(q[1] - p[1])) for p, q in zip(vals, vals[1:])]
+            assert max(steps) <= 71 and min(steps) > 0      # 150-700 ед/с, шаг 100 мс
+        else:
+            assert len(times) > 1                           # статусы по-прежнему меняются
+
+
+def test_v40_t8_lie_is_inside_marzullo_and_outside_sensor_tolerance():
+    truth = sim.build_world(1, 5, 120_000, world="kinematic")["truth"]
+    liar = mk_node(4, n=5, truth=truth, attack="T8")
+    t = sn.ATTACK_START_MS + 1000
+    liar.generate(t, "target_2.pos", [0, 0], None)
+    ev = liar.events[max(liar.events, key=lambda e: liar.events[e].hlc[0])]
+    tv = sn.truth_at(truth, "target_2.pos", t)
+    off = [abs(ev.value[i] - tv[i]) for i in (0, 1)]
+    assert all(600 <= o <= 1500 for o in off)
+    assert all(o > sn.Sensor.POS_TOL for o in off)
+    assert all(o < sn.MZ_H + sn.MZ_D for o in off)
+    assert liar.attack_log[-1][0] == "T8"
+
+
+def test_v40_predictor_fits_motion_and_survives_one_liar_author():
+    import kinematics as kin
+    line = lambda t: (10_000 + 0.4 * t, 20_000 - 0.25 * t)       # 400 и -250 ед/с
+    cl = [(t, a, line(t)) for a in range(4) for t in range(1000 + 230 * a, 4000, 900)]
+    px, py = kin.predict(cl, 4000)
+    assert abs(px - line(4000)[0]) < 1 and abs(py - line(4000)[1]) < 1
+    bad = [(t, 0, (x + 1200, y - 900)) if a == 0 else (t, a, (x, y)) for t, a, (x, y) in cl]
+    px, py = kin.predict(bad, 4000)                              # автор 0 лжёт
+    assert abs(px - line(4000)[0]) < 1 and abs(py - line(4000)[1]) < 1
+    assert kin.predict([c for c in cl if c[1] == 1], 4000) is None   # один автор - нет прогноза
+    assert kin.predict(cl[:3], 4000) is None                         # мало точек
+
+
+def _gate_node(**kw):
+    truth = sim.build_world(1, 5, 120_000, world="kinematic")["truth"]
+    k, t = "target_1.pos", 70_000
+    r = mk_node(0, n=5, truth=truth, arbiter="anis", sensor_model="interval", marzullo=1,
+                traj_gate=True, drifts=[0] * 5, **kw)
+    for a in (1, 2, 3):
+        au = mk_node(a, n=5, truth=truth, drifts=[0] * 5)
+        for tm in range(t - 3600 + 300 * a, t, 1000):
+            r.accept(au.gen_own(tm, k, list(sn.truth_at(truth, k, tm)), None).env, tm + 50)
+    liar = mk_node(4, n=5, truth=truth, drifts=[0] * 5)
+    tv = sn.truth_at(truth, k, t)
+    return r, liar, k, t, tv
+
+
+def test_v40_traj_gate_refutes_t8_keeps_honest_and_fails_safe():
+    r, liar, k, t, tv = _gate_node()
+    lie = liar.gen_own(t, k, [tv[0] + 1100, tv[1] - 900], None)
+    hon = liar.gen_own(t + 10, k, [tv[0] + 30, tv[1] - 20], None)
+    for e in (lie, hon):
+        r.accept(e.env, t + 60)
+    assert r._traj_refutes(r.events[lie.eid]) is True
+    assert r._traj_refutes(r.events[hon.eid]) is False
+    # свой грубый сбой: датчик далёк и от заявки, и от прогноза - решения нет (v3.1)
+    r2, liar2, k, t, tv = _gate_node()
+    r2.sensor.reading = lambda key, value, h: [tv[0] + 4000, tv[1] + 3500]
+    e = liar2.gen_own(t, k, [tv[0] + 30, tv[1] - 20], None)
+    r2.accept(e.env, t + 60)
+    assert r2._traj_refutes(r2.events[e.eid]) is False
+
+
+def test_v40_traj_gate_needs_the_kinematic_world():
+    """Мир steps: дрейф часов +-2 с, шлюз не включается (иначе опровергает
+    честные заявки - 143 980 на сетке 490)."""
+    rec, res = sim.run_once(dict(n=3, duration_s=8, events_until_s=6, seed=4, base_port=23700,
+                                 arbiter="anis", sensor_model="interval", marzullo=1,
+                                 traj_gate=True))
+    assert rec["metrics"]["traj_checks"] == 0
+
+
+def test_v40_tombstones_in_pull_back_off_per_peer():
+    r = mk_node(0, n=5, tomb_backoff=True)
+    r.tomb_events = [sn.Ev("t" * 64, "tombstone", 0, {}, 0, {})]
+    sent = []
+    for ms in range(0, 40_000, 500):
+        r.clock = ms
+        if r._tombs_for(1):
+            sent.append(ms)
+    assert sent == [0, 1000, 3000, 7000, 15_000, 31_000]      # отступ 1, 2, 4, 8, 16 с
+    r.clock = 31_500
+    assert r._tombs_for(2)                                       # свой счёт у каждого соседа
+    plain = mk_node(0, n=5)
+    plain.tomb_events = r.tomb_events
+    assert plain._tombs_for(1) == plain._tombs_for(1) == r.tomb_events   # v3.1: в каждом ответе
+
+
+def test_v40_claim_truth_is_judged_at_the_claim_moment():
+    truth = sim.build_world(1, 5, 120_000, world="kinematic")["truth"]
+    r = mk_node(0, n=5, truth=truth, world="kinematic")
+    au = mk_node(1, n=5, truth=truth)
+    k, t = "target_0.pos", 70_000
+    tv = sn.truth_at(truth, k, t)
+    ok = au.gen_own(t, k, [tv[0] + 40, tv[1] - 40], None)
+    lie = au.gen_own(t + 5, k, [tv[0] + 900, tv[1] + 900], None)
+    assert r._claim_true(ok) and not r._claim_true(lie)
+    assert r.point_truth and not mk_node(0, n=5).point_truth
