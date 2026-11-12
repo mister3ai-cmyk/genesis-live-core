@@ -30,6 +30,10 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
  * прогноза - RT_FAILSAFE. Иначе RT_PASS. Задержка доставки (метка в
  * прошлом) шлюз не выключает.
  * res_claim (может быть NULL) - невязка заявки, -1 если прогноза не было. */
+/* Для тестов: максимальное относительное расхождение сумм, веденных при
+ * записи, с прямым пересчётом из кольца (дрейф плавающей точки). */
+double rt_kin_sums_check(const rt_context_t *ctx, int target);
+
 int rt_kin_gate(rt_context_t *ctx, int target, int author,
                 int64_t t_claim_us, int64_t now_us,
                 const double claim[3], const double mine[3], double *res_claim);

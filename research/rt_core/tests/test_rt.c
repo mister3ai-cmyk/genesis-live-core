@@ -195,10 +195,65 @@ static void test_kinematics(void)
     CHECK(rt_ctx_size() == sizeof(rt_context_t));
 }
 
+/* Дрейф инкрементальных сумм: 10^5 записей подряд, 4 автора, координаты
+ * ~1e6-1e7, 8 отсчётов/с (кольцо 32 = 4 с); на каждой 1000-й - суммы против
+ * прямого пересчёта и прогноз против контекста, собранного заново из кольца. */
+static void ring_traj(double t, double p[3])
+{
+    p[0] = 5e6 + 400.0 * t;
+    p[1] = 3e6 - 250.0 * t + 1000.0 * sin(0.3 * t);
+    p[2] = 1e4 + 50.0 * sin(0.7 * t);
+}
+
+static void test_incremental_drift(void)
+{
+    static rt_context_t c, fresh;
+    double worst_sum = 0.0, worst_pred = 0.0;
+    long tick;
+    int i, ok_pred = 1, n_cmp = 0;
+    rt_init(&c, NULL);
+    for (tick = 1; tick <= 100000; tick++) {
+        int64_t t = tick * 125000;
+        double p[3];
+        ring_traj((double)t / 1e6, p);
+        if (rt_kin_push(&c, 0, (int)(tick % 4), t, t, p) != RT_OK)
+            ok_pred = 0;
+        if (tick % 1000 == 0) {
+            double e = rt_kin_sums_check(&c, 0), a[3], b[3];
+            const rt_ring_t *r = &c.ring[0];
+            if (e > worst_sum)
+                worst_sum = e;
+            rt_init(&fresh, NULL);
+            for (i = 0; i < r->count; i++) {        /* по времени: от старейшего */
+                const rt_obs_t *o = &r->obs[(r->head + i) % RT_RING];
+                rt_kin_push(&fresh, 0, o->author, o->t_us, o->t_us, o->p);
+            }
+            if (rt_kin_predict(&c, 0, t + 60000, -1, a) == RT_OK
+                    && rt_kin_predict(&fresh, 0, t + 60000, -1, b) == RT_OK) {
+                int ax;
+                n_cmp++;
+                for (ax = 0; ax < 3; ax++) {
+                    double d = fabs(a[ax] - b[ax]) / (fabs(b[ax]) + 1.0);
+                    if (d > worst_pred)
+                        worst_pred = d;
+                }
+            } else
+                ok_pred = 0;
+        }
+    }
+    printf("дрейф за 10^5 записей: суммы %.2e, прогноз %.2e (отн.), перебазирований %u\n",
+           worst_sum, worst_pred, c.ring[0].n_rebase);
+    CHECK(ok_pred && n_cmp == 100);
+    CHECK(worst_sum < 1e-9);
+    CHECK(worst_pred < 1e-9);
+    CHECK(c.ring[0].n_rebase > 0);
+}
+
 int main(void)
 {
     test_grassmann();
     test_kinematics();
+    test_incremental_drift();
     printf("rt_core: %d passed, %d failed\n", n_ok, n_fail);
     return n_fail ? 1 : 0;
 }

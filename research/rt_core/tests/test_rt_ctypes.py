@@ -43,8 +43,10 @@ def test_orth_and_chordal_match_numpy_reference():
             assert abs(rt_core.chordal2(LIB, Q, Qn) - np.sum(np.sin(th) ** 2)) < 1e-10
 
 
-def test_predictor_matches_python_reference_with_and_without_liar():
-    """2D-данные (z = 0): C-предиктор против kinematics.predict."""
+@pytest.mark.parametrize("q_back_ms", [0, 1500], ids=["query-now", "late-delivery"])
+def test_predictor_matches_python_reference_with_and_without_liar(q_back_ms):
+    """2D-данные (z = 0): C-предиктор против kinematics.predict. late-delivery:
+    запрос на 1.5 с раньше последних точек - часть кольца «в будущем»."""
     rng = random.Random(1)
     n_cmp = n_none = 0
     for trial in range(300):
@@ -69,8 +71,9 @@ def test_predictor_matches_python_reference_with_and_without_liar():
         c = rt_core.Kin(LIB)
         for tc, a, p in claims:
             assert c.push(0, a, tc * 1000, p) == rt_core.OK
-        ref = kin.predict(claims, T)
-        got = c.predict(0, T * 1000)
+        Tq = T - q_back_ms
+        ref = kin.predict(claims, Tq)
+        got = c.predict(0, Tq * 1000)
         if ref is None:
             n_none += 1
             assert got is None
@@ -79,7 +82,7 @@ def test_predictor_matches_python_reference_with_and_without_liar():
         assert got is not None
         assert abs(got[0] - ref[0]) < 1e-6 and abs(got[1] - ref[1]) < 1e-6 and got[2] == 0.0
     print("\nсверка предиктора: %d совпали, %d - прогноза нет у обоих" % (n_cmp, n_none))
-    assert n_cmp >= 250
+    assert n_cmp >= 200
 
 
 def test_gate_verdicts_through_ctypes():

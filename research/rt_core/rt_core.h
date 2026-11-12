@@ -47,11 +47,28 @@ typedef struct {
     uint8_t author;
 } rt_obs_t;
 
+/* Суммы нормальных уравнений автора в локальном времени кольца
+ * s = (t - t0_us) / 1e6 с: S[k] = sum s^k (k = 0..4), B[k][ax] = sum s^k p_ax
+ * (k = 0..2). Ведутся при записи (вытесненный отсчёт вычитается); при запросе
+ * сдвигаются к tau = s - s_q биномиально, без прохода по точкам. */
 typedef struct {
-    rt_obs_t obs[RT_RING];
-    int      head;             /* куда писать следующее */
-    int      count;
-    int64_t  last_t[RT_MAX_AUTHORS];   /* последняя метка автора - монотонность */
+    double S[5];
+    double B[3][3];
+    int    n;
+} rt_sums_t;
+
+#define RT_REBASE_S      16.0  /* перебазировать t0, если метка дальше 16 с */
+#define RT_REBASE_EVICT  1024  /* ... или после стольких вытеснений (дрейф) */
+
+typedef struct {
+    rt_obs_t  obs[RT_RING];
+    int       head;            /* куда писать следующее */
+    int       count;
+    int64_t   last_t[RT_MAX_AUTHORS];  /* последняя метка автора - монотонность */
+    rt_sums_t sums[RT_MAX_AUTHORS];    /* по всем отсчётам автора в кольце */
+    int64_t   t0_us;                   /* опорный момент локального времени */
+    uint32_t  n_evict;                 /* вытеснений с последнего перебазирования */
+    uint32_t  n_rebase;
 } rt_ring_t;
 
 typedef struct {

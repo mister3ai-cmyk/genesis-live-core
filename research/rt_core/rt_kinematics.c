@@ -37,6 +37,42 @@ int rt_init(rt_context_t *ctx, const rt_cfg_t *cfg)
     return RT_OK;
 }
 
+/* ------------------------------------------------- суммы в локальном времени */
+
+static void raw_add(rt_sums_t *S, double s, const double *p, double sign)
+{
+    double s2 = s * s;
+    int ax;
+    S->S[0] += sign;
+    S->S[1] += sign * s;
+    S->S[2] += sign * s2;
+    S->S[3] += sign * s2 * s;
+    S->S[4] += sign * s2 * s2;
+    for (ax = 0; ax < 3; ax++) {
+        S->B[0][ax] += sign * p[ax];
+        S->B[1][ax] += sign * s * p[ax];
+        S->B[2][ax] += sign * s2 * p[ax];
+    }
+    S->n += sign > 0 ? 1 : -1;
+}
+
+static double loc_s(const rt_ring_t *r, int64_t t_us)
+{
+    return (double)(t_us - r->t0_us) / 1e6;
+}
+
+/* Перебазирование: t0 = t_us, суммы всех авторов заново из кольца. */
+static void rebase(rt_ring_t *r, int64_t t_us)
+{
+    int i;
+    r->t0_us = t_us;
+    memset(r->sums, 0, sizeof(r->sums));
+    for (i = 0; i < r->count; i++)
+        raw_add(&r->sums[r->obs[i].author], loc_s(r, r->obs[i].t_us), r->obs[i].p, 1.0);
+    r->n_evict = 0;
+    r->n_rebase++;
+}
+
 int rt_kin_push(rt_context_t *ctx, int target, int author,
                 int64_t t_us, int64_t now_us, const double p[3])
 {
@@ -51,7 +87,13 @@ int rt_kin_push(rt_context_t *ctx, int target, int author,
         return RT_ERR_TIME;
     }
     r->last_t[author] = t_us;
+    if (r->count == 0)
+        r->t0_us = t_us;
     o = &r->obs[r->head];
+    if (r->count == RT_RING) {                   /* вытесняем старейший */
+        raw_add(&r->sums[o->author], loc_s(r, o->t_us), o->p, -1.0);
+        r->n_evict++;
+    }
     o->t_us = t_us;
     o->author = (uint8_t)author;
     o->p[0] = p[0];
@@ -60,14 +102,50 @@ int rt_kin_push(rt_context_t *ctx, int target, int author,
     r->head = (r->head + 1) % RT_RING;
     if (r->count < RT_RING)
         r->count++;
+    if (fabs(loc_s(r, t_us)) > RT_REBASE_S || r->n_evict >= RT_REBASE_EVICT)
+        rebase(r, t_us);
+    else
+        raw_add(&r->sums[author], loc_s(r, t_us), p, 1.0);
     ctx->n_push++;
     return RT_OK;
+}
+
+double rt_kin_sums_check(const rt_context_t *ctx, int target)
+{
+    static const double one = 1.0;
+    const rt_ring_t *r;
+    rt_sums_t D[RT_MAX_AUTHORS];
+    double worst = 0.0;
+    int i, a, k, ax;
+    if (!ctx || target < 0 || target >= RT_MAX_TARGETS)
+        return -1.0;
+    r = &ctx->ring[target];
+    memset(D, 0, sizeof(D));
+    for (i = 0; i < r->count; i++)
+        raw_add(&D[r->obs[i].author], loc_s(r, r->obs[i].t_us), r->obs[i].p, one);
+    for (a = 0; a < RT_MAX_AUTHORS; a++) {
+        for (k = 0; k < 5; k++) {
+            double e = fabs(r->sums[a].S[k] - D[a].S[k]) / (fabs(D[a].S[k]) + 1.0);
+            if (e > worst)
+                worst = e;
+        }
+        for (k = 0; k < 3; k++)
+            for (ax = 0; ax < 3; ax++) {
+                double e = fabs(r->sums[a].B[k][ax] - D[a].B[k][ax]) / (fabs(D[a].B[k][ax]) + 1.0);
+                if (e > worst)
+                    worst = e;
+            }
+        if (r->sums[a].n != D[a].n)
+            return 1e300;
+    }
+    return worst;
 }
 
 /* ------------------------------------------------------------ подгонка */
 
 typedef struct {
     double tau[RT_RING];       /* секунды до момента прогноза (<= 0) */
+    double tau2[RT_RING];
     double p[RT_RING][3];
     int    author[RT_RING];
     int    n;
@@ -133,6 +211,37 @@ static void sums_add(sums_t *S, double tau, const double *p, double sign)
     S->n += sign > 0 ? 1 : -1;
 }
 
+/* Сдвиг сумм из локального времени кольца s к tau = s - s_q:
+ * sum tau^m = sum_j C(m, j) S_j (-s_q)^(m-j); то же для B. */
+static void shift(const rt_sums_t *R, double s_q, sums_t *out)
+{
+    static const double C[5][5] = {{1, 0, 0, 0, 0}, {1, 1, 0, 0, 0}, {1, 2, 1, 0, 0},
+                                   {1, 3, 3, 1, 0}, {1, 4, 6, 4, 1}};
+    double pw[5], T[5], U[3][3];
+    int m, j, ax;
+    pw[0] = 1.0;
+    for (m = 1; m < 5; m++)
+        pw[m] = pw[m - 1] * -s_q;
+    for (m = 0; m < 5; m++) {
+        T[m] = 0.0;
+        for (j = 0; j <= m; j++)
+            T[m] += C[m][j] * R->S[j] * pw[m - j];
+    }
+    for (m = 0; m < 3; m++)
+        for (ax = 0; ax < 3; ax++) {
+            U[m][ax] = 0.0;
+            for (j = 0; j <= m; j++)
+                U[m][ax] += C[m][j] * R->B[j][ax] * pw[m - j];
+        }
+    for (m = 0; m < 3; m++) {
+        for (j = 0; j < 3; j++)
+            out->A[m][j] = T[m + j];
+        for (ax = 0; ax < 3; ax++)
+            out->B[m][ax] = U[m][ax];
+    }
+    out->n = R->n;
+}
+
 /* Подгонка по готовым суммам; степень по числу точек. 0 - не удалось. */
 static int fit_sums(const sums_t *S, double coef[3][3], int *deg)
 {
@@ -146,17 +255,20 @@ static int fit_sums(const sums_t *S, double coef[3][3], int *deg)
     return solve3(m, A, B, coef);
 }
 
-/* Квадрат невязки точки против подгонки. */
-static double resid2(double coef[3][3], int deg, double tau, const double *p)
+/* Точка согласна с подгонкой: квадрат невязки <= tol2. У подгонки 1-й
+ * степени coef[2] = 0 (fit_sums обнуляет), поэтому формула одна. Выход, как
+ * только частичная сумма превысила порог, - ответ тот же. */
+static int agrees(double coef[3][3], double tau, double tau2, const double *p, double tol2)
 {
     double s = 0.0;
     int ax;
     for (ax = 0; ax < 3; ax++) {
-        double v = coef[0][ax] + coef[1][ax] * tau
-                   + (deg == 2 ? coef[2][ax] * tau * tau : 0.0);
-        s += (p[ax] - v) * (p[ax] - v);
+        double d = p[ax] - (coef[0][ax] + coef[1][ax] * tau + coef[2][ax] * tau2);
+        s += d * d;
+        if (s > tol2)
+            return 0;
     }
-    return s;
+    return 1;
 }
 
 static int usable(const pts_t *P, const int *use, int min_pts)
@@ -179,21 +291,28 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
 {
     const rt_ring_t *r;
     pts_t P;
-    int use[RT_RING], best[RT_RING], cand[RT_RING];
+    int use[RT_RING], best[RT_RING];
     int authors[RT_MAX_AUTHORS], n_auth = 0;
-    int i, s, best_n = -1, deg;
-    double coef[3][3], tol2;
-    sums_t total, by_auth[RT_MAX_AUTHORS], S;
+    int i, s, best_n = -1, best_exact = 0, deg;
+    double coef[3][3], tol2, s_q;
+    sums_t total, by_auth[RT_MAX_AUTHORS], S, S_best;
+    rt_sums_t outside[RT_MAX_AUTHORS];
     if (!ctx || !out || target < 0 || target >= RT_MAX_TARGETS)
         return RT_ERR_ARG;
     r = &ctx->ring[target];
     P.n = 0;
+    memset(outside, 0, sizeof(outside));
     for (i = 0; i < r->count; i++) {
         const rt_obs_t *o = &r->obs[i];
-        if (o->author == exclude_author || o->t_us >= t_us
-                || o->t_us < t_us - ctx->cfg.horizon_us)
+        if (o->author == exclude_author)
             continue;
+        if (o->t_us >= t_us || o->t_us < t_us - ctx->cfg.horizon_us) {
+            /* вне окна: вычесть из сумм автора при сдвиге (обычно 0-2 точки) */
+            raw_add(&outside[o->author], loc_s(r, o->t_us), o->p, 1.0);
+            continue;
+        }
         P.tau[P.n] = (double)(o->t_us - t_us) / 1e6;
+        P.tau2[P.n] = P.tau[P.n] * P.tau[P.n];
         P.p[P.n][0] = o->p[0];
         P.p[P.n][1] = o->p[1];
         P.p[P.n][2] = o->p[2];
@@ -211,15 +330,22 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
         if (!seen)
             authors[n_auth++] = a;
     }
-    /* суммы нормальных уравнений: по каждому автору один раз; кандидат
-       «без автора a» = итог - суммы a (O(авторов), а не O(точек)) */
+    /* суммы автора в окне = суммы, веденные при записи, минус точки вне
+       окна; сдвиг из локального времени кольца к tau = s - s_q. Кандидат
+       «без автора a» = итог - суммы a: O(авторов), а не O(точек) */
     memset(&total, 0, sizeof(total));
-    memset(by_auth, 0, sizeof(by_auth));
-    for (i = 0; i < P.n; i++) {
-        int k = 0;
-        while (authors[k] != P.author[i])
-            k++;
-        sums_add(&by_auth[k], P.tau[i], P.p[i], 1.0);
+    s_q = loc_s(r, t_us);
+    for (s = 0; s < n_auth; s++) {
+        rt_sums_t w = r->sums[authors[s]];
+        const rt_sums_t *x = &outside[authors[s]];
+        int k, ax;
+        for (k = 0; k < 5; k++)
+            w.S[k] -= x->S[k];
+        for (k = 0; k < 3; k++)
+            for (ax = 0; ax < 3; ax++)
+                w.B[k][ax] -= x->B[k][ax];
+        w.n -= x->n;
+        shift(&w, s_q, &by_auth[s]);
     }
     for (s = 0; s < n_auth; s++) {
         int a, b;
@@ -244,27 +370,72 @@ int rt_kin_predict(const rt_context_t *ctx, int target, int64_t t_us,
                 }
             S.n -= by_auth[s].n;
         }
-        for (i = 0; i < P.n; i++)
-            cand[i] = s < 0 || P.author[i] != authors[s];
-        if (!usable(&P, cand, ctx->cfg.min_pts) || !fit_sums(&S, coef, &deg))
+        /* годность кандидата по счётчикам: точек >= min_pts, авторов >= 2
+           (без одного из > 2 авторов их остаётся >= 2) */
+        if (S.n < ctx->cfg.min_pts || !fit_sums(&S, coef, &deg))
             continue;
-        for (i = 0; i < P.n; i++) {
-            use[i] = resid2(coef, deg, P.tau[i], P.p[i]) <= tol2;
-            n_in += use[i];
-        }
-        if (n_in > best_n) {
-            best_n = n_in;
-            memcpy(best, use, sizeof(int) * (size_t)P.n);
+        {
+            int exact = 1, beaten = 0, skip = s < 0 ? -1 : authors[s];
+            for (i = 0; i < P.n; i++) {
+                use[i] = agrees(coef, P.tau[i], P.tau2[i], P.p[i], tol2);
+                n_in += use[i];
+                exact &= use[i] == (P.author[i] != skip);
+                if (n_in + (P.n - i - 1) <= best_n) {   /* лучшего уже не превзойти */
+                    beaten = 1;
+                    break;
+                }
+            }
+            if (!beaten && n_in > best_n) {
+                best_n = n_in;
+                best_exact = exact;
+                S_best = S;
+                memcpy(best, use, sizeof(int) * (size_t)P.n);
+            }
         }
         if (best_n == P.n)      /* все точки согласны: больше не набрать, итог тот же */
             break;
     }
     if (best_n < 0 || !usable(&P, best, ctx->cfg.min_pts))
         return RT_NO_PRED;
-    memset(&S, 0, sizeof(S));
-    for (i = 0; i < P.n; i++)
-        if (best[i])
-            sums_add(&S, P.tau[i], P.p[i], 1.0);
+    if (!best_exact) {
+        /* согласны ровно все точки, кроме точек одного автора? - тогда суммы
+           готовы: итог минус этот автор (частый случай: лжец в окне) */
+        int in_k[RT_MAX_AUTHORS], all_k[RT_MAX_AUTHORS], k, out_k = -1, ok = 1;
+        memset(in_k, 0, sizeof(in_k));
+        memset(all_k, 0, sizeof(all_k));
+        for (i = 0; i < P.n; i++) {
+            for (k = 0; authors[k] != P.author[i]; k++)
+                ;
+            all_k[k]++;
+            in_k[k] += best[i];
+        }
+        for (k = 0; k < n_auth && ok; k++) {
+            if (in_k[k] == 0 && out_k < 0)
+                out_k = k;
+            else if (in_k[k] != all_k[k])
+                ok = 0;
+        }
+        if (ok && out_k >= 0) {
+            int a, b;
+            S_best = total;
+            for (a = 0; a < 3; a++)
+                for (b = 0; b < 3; b++) {
+                    S_best.A[a][b] -= by_auth[out_k].A[a][b];
+                    S_best.B[a][b] -= by_auth[out_k].B[a][b];
+                }
+            S_best.n -= by_auth[out_k].n;
+            best_exact = 1;
+        }
+    }
+    if (best_exact) {
+        /* суммы набора согласных точек уже готовы */
+        S = S_best;
+    } else {
+        memset(&S, 0, sizeof(S));
+        for (i = 0; i < P.n; i++)
+            if (best[i])
+                sums_add(&S, P.tau[i], P.p[i], 1.0);
+    }
     if (!fit_sums(&S, coef, &deg))
         return RT_NO_PRED;
     out[0] = coef[0][0];
