@@ -31,7 +31,9 @@ plen согласован с типом и длиной -> автор в рее�
   * битая подпись или испорченный кадр - автор НЕ установлен (поле author
     может подставить кто угодно), поэтому в карантин идёт транспортный
     источник (адрес), а не автор: иначе мусором «от имени» честного узла
-    его можно было бы изолировать;
+    его можно было бы изолировать. Карантин источника - за серию
+    (src_viol_n нарушений за src_viol_window) и на срок src_ttl, потом
+    реабилитация: единичная порча в канале не отрезает борт навсегда;
   * подписанная метка из будущего (> max_skew) - автор (подпись доказывает
     авторство);
   * подтверждённое кинематическое вето - автор: veto_k опровержений его
@@ -57,6 +59,7 @@ PAYLOAD = {CLAIM: struct.Struct(">ddd"), REFUTE: struct.Struct(">BBHI"),
 REASON_TRAJ_VETO, REASON_SENSOR = 1, 2
 assert HDR.size == 22
 _PK_CACHE = {}          # байты ключа -> разобранный ключ (разбор дорогой)
+REPLAY_WIN = 64         # окно повторов: столько номеров назад кадр ещё принимается
 
 
 class FrameError(ValueError):
@@ -129,13 +132,16 @@ class Node:
     """Узел шины: подписывает свои кадры, проверяет чужие, держит карантин и
     кормит C99-шлюз (kin - rt_core.Kin или None для транспорта без шлюза)."""
 
-    def __init__(self, me, sk, pubkeys, kin=None, max_skew_us=50_000, veto_k=3, veto_window_us=10_000_000):
+    def __init__(self, me, sk, pubkeys, kin=None, max_skew_us=50_000, veto_k=3, veto_window_us=10_000_000,
+                 src_viol_n=3, src_viol_window_us=10_000_000, src_ttl_us=30_000_000):
         self.me, self.sk, self.pub, self.kin = me, sk, dict(pubkeys), kin
         self.max_skew, self.veto_k, self.veto_window = max_skew_us, veto_k, veto_window_us
+        self.src_viol_n, self.src_viol_window, self.src_ttl = src_viol_n, src_viol_window_us, src_ttl_us
         self.seq = 0
-        self.last_seq = {}            # автор -> последний принятый seq
-        self.q_authors = {}           # автор -> причина
-        self.q_sources = {}           # транспортный адрес -> причина
+        self.last_seq = {}            # автор -> (старший seq, битовая карта окна)
+        self.q_authors = {}           # автор -> причина (бессрочно: атака подписана)
+        self.q_sources = {}           # транспортный адрес -> до какого момента, мкс
+        self.src_viol = {}            # адрес -> метки нарушений формата/подписи
         self.vetoes = {}              # автор -> метки времени опровержений
         self.targets_seen = set()
         self.tombs = []               # надгробия к рассылке: (кадр, id)
@@ -161,30 +167,56 @@ class Node:
         self.tombs.append((tomb, (a, reason)))
         self._count("quarantine_author")
 
+    def _fresh(self, a, seq):
+        """Окно повторов как в IPsec: старший seq и битовая карта
+        REPLAY_WIN предыдущих. Кадры, обогнавшие друг друга в сети, не
+        теряются; точный дубль и слишком старый номер - повтор."""
+        top, bits = self.last_seq.get(a, (0, 0))
+        if seq > top:
+            shift = seq - top
+            bits = ((bits << shift) | (1 << (shift - 1))) & ((1 << REPLAY_WIN) - 1) if shift <= REPLAY_WIN else 0
+            self.last_seq[a] = (seq, bits)
+            return True
+        back = top - seq
+        if back == 0 or back > REPLAY_WIN or bits >> (back - 1) & 1:
+            return False
+        self.last_seq[a] = (top, bits | (1 << (back - 1)))
+        return True
+
     def tombs_for(self, peer, now_us):
         return [f for f, tid in self.tombs if self.backoff.due(peer, tid, now_us)]
 
     def receive(self, frame, src, now_us, mine=None):
         """Принять кадр. mine(target, t_us) -> моё измерение или None.
         Возвращает (что сделано, кадр-ответ или None)."""
-        if src in self.q_sources:
-            self._count("drop_source")
-            return "drop_source", None
+        until = self.q_sources.get(src)
+        if until is not None:
+            if now_us < until:
+                self._count("drop_source")
+                return "drop_source", None
+            del self.q_sources[src]                       # срок вышел - реабилитация
+            self.src_viol.pop(src, None)
+            self._count("source_released")
         try:
             f = unpack(frame, self.pub)
         except FrameError as e:
             self._count("reject_" + e.reason)
             if e.reason in ("signature", "length", "magic", "version", "type", "short"):
-                self.q_sources[src] = e.reason            # автор не установлен - виноват источник
+                # автор не установлен - виноват источник; но один битый кадр
+                # бывает и от порчи в канале: карантин только за серию, и на срок
+                vs = [t for t in self.src_viol.get(src, []) if t > now_us - self.src_viol_window] + [now_us]
+                self.src_viol[src] = vs
+                if len(vs) >= self.src_viol_n:
+                    self.q_sources[src] = now_us + self.src_ttl
+                    self._count("quarantine_source")
             return "reject_" + e.reason, None
         a = f["author"]
         if a in self.q_authors:
             self._count("drop_quarantined")
             return "drop_quarantined", None
-        if f["seq"] <= self.last_seq.get(a, 0):
+        if not self._fresh(a, f["seq"]):
             self._count("replay")
             return "replay", None
-        self.last_seq[a] = f["seq"]
         if f["t_us"] > now_us + self.max_skew:
             self.quarantine_author(a, 3, now_us)          # подписанная метка из будущего
             return "quarantine_future", None

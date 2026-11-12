@@ -63,21 +63,34 @@ def test_format_errors_have_specific_reasons():
     assert e.value.reason == "signature"
 
 
-def test_forgery_quarantines_source_not_the_named_author():
-    n = gl.Node(0, KEYS[0][0], PUB)
-    forged = gl.pack(KEYS[3][0], gl.CLAIM, 1, 0, 1, 1000, 0.0, 0.0, 0.0)
-    assert n.receive(forged, "10.0.0.66:9000", 2000)[0] == "reject_signature"
-    assert "10.0.0.66:9000" in n.q_sources and 1 not in n.q_authors
-    assert n.receive(_claim(1, 1, 1500), "10.0.0.1:9000", 2000)[0] == "pass"    # автор 1 цел
-    assert n.receive(_claim(1, 2, 1600), "10.0.0.66:9000", 2000)[0] == "drop_source"
+def test_forgery_quarantines_source_for_a_series_and_a_ttl_not_the_named_author():
+    n = gl.Node(0, KEYS[0][0], PUB, src_viol_n=3, src_viol_window_us=10_000_000, src_ttl_us=30_000_000)
+    bad = "10.0.0.66:9000"
+    forged = lambda s: gl.pack(KEYS[3][0], gl.CLAIM, 1, 0, s, 1000, 0.0, 0.0, 0.0)
+    assert n.receive(forged(1), bad, 1_000_000)[0] == "reject_signature"
+    assert bad not in n.q_sources                         # один битый кадр - не повод
+    assert n.receive(_claim(1, 1, 1500), "10.0.0.1:9000", 1_000_000)[0] == "pass"
+    n.receive(forged(2), bad, 2_000_000)
+    n.receive(forged(3), bad, 3_000_000)                  # третий за 10 с - карантин
+    assert bad in n.q_sources and 1 not in n.q_authors    # автор 1 цел
+    assert n.receive(_claim(1, 2, 3_500_000), bad, 3_500_000)[0] == "drop_source"
+    assert n.receive(_claim(1, 3, 33_000_000), bad, 33_000_001)[0] == "pass"   # срок вышел
+    assert bad not in n.q_sources
+    m = gl.Node(0, KEYS[0][0], PUB)                       # нарушения реже окна - карантина нет
+    for k in range(5):
+        m.receive(forged(10 + k), bad, k * 11_000_000)
+    assert bad not in m.q_sources
 
 
 def test_replay_and_future_timestamp():
     n = gl.Node(0, KEYS[0][0], PUB, max_skew_us=50_000)
     assert n.receive(_claim(1, 5, 1_000_000), "s1", 1_000_100)[0] == "pass"
-    assert n.receive(_claim(1, 5, 1_000_000), "s1", 1_000_200)[0] == "replay"
-    assert n.receive(_claim(1, 4, 1_000_000), "s1", 1_000_200)[0] == "replay"
+    assert n.receive(_claim(1, 5, 1_000_000), "s1", 1_000_200)[0] == "replay"   # точный дубль
+    assert n.receive(_claim(1, 4, 1_000_000), "s1", 1_000_200)[0] == "pass"     # обогнан в сети - принять
+    assert n.receive(_claim(1, 4, 1_000_000), "s1", 1_000_200)[0] == "replay"   # но только один раз
     assert n.receive(_claim(1, 6, 900_000), "s1", 1_000_300)[0] == "pass"       # задержка доставки - норма
+    assert n.receive(_claim(1, 200, 900_000), "s1", 1_000_300)[0] == "pass"
+    assert n.receive(_claim(1, 100, 900_000), "s1", 1_000_300)[0] == "replay"   # старше окна 64
     assert n.receive(_claim(2, 1, 1_100_000), "s2", 1_000_000)[0] == "quarantine_future"
     assert n.q_authors == {2: 3}
     assert n.receive(_claim(2, 2, 1_000_000), "s2", 1_000_000)[0] == "drop_quarantined"
