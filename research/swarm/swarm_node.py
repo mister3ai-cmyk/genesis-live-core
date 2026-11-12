@@ -43,6 +43,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 import swarm_net as net
 import swarm_wire as wire
 from apsa_engine import APSASanitaryAudit, INTENTIONAL
+import kinematics as kin
 import marzullo as mz
 from tombstone_registry import TombstoneRegistry
 
@@ -52,6 +53,7 @@ N_SECTORS = 16
 N_TARGETS = 4
 ATTACK_START_MS = 60_000
 # v3 (Шаг 3): окно источников, полуширина измерения и запас на движение цели
+TRAJ_THR = 800                  # v4.0: порог невязки кинематического шлюза (этап B)
 MZ_W_MS = 1_000                 # заявки других авторов ближе 1 с к событию
 MZ_H = 150                      # ±3σ шума ±50 у автора и у измерения, с запасом
 MZ_D = 1_600                    # истина меняется шагами до 1 500 по оси
@@ -456,7 +458,8 @@ class Node:
         self.pubs = {k.author: k.pub for k in self.keys}
         self.idx_of = {k.author: i for i, k in enumerate(self.keys)}
         self.rng = random.Random("node:%s:%d" % (seed, idx))
-        drift = random.Random("drift:%s:%d" % (seed, idx)).randint(-2000, 2000)
+        dm = cfg.get("drift_max_ms", 2000)     # v4.0: мир kinematic - время GNSS, +-20 мс
+        drift = random.Random("drift:%s:%d" % (seed, idx)).randint(-dm, dm)
         if cfg.get("drifts") is not None:
             drift = cfg["drifts"][idx]
         self.hlc = HLC(drift)
@@ -555,6 +558,10 @@ class Node:
         self.vmeas = {}             # eid -> {голосующий: измерение}
         self.mz_cache = {}          # eid -> (версия данных, решение)
         self.mz_suppressed = 0      # не опроверг: в меньшинстве мой датчик
+        self.traj_gate = bool(cfg.get("traj_gate", False))   # v4.0
+        self.traj_cache = {}        # eid -> (версия данных, решение)
+        self.traj_checks = 0        # мой датчик против заявки, прогноз посчитан
+        self.traj_veto = 0          # прогноз за мой датчик: опровергаю
         self.false_ref = {"pos": 0, "status": 0}   # инструментовка: опровергнута правда
         if self.anis:
             self.slash = True
@@ -1063,6 +1070,10 @@ class Node:
                 # мой датчик против согласия остальных источников - сбой мой
                 self.mz_suppressed += 1
                 ok = None
+            if ok is not False and self.traj_gate and ev.key.endswith(".pos") \
+                    and self.sensor.model == "interval" and self._traj_refutes(ev):
+                self.traj_veto += 1
+                ok = False
             if ok is None:
                 pass
             elif ok:
@@ -1088,6 +1099,37 @@ class Node:
         if nb >= 5 and nb >= 0.25 * len(q):
             gap = self.liar_gap if self.liar_gap is not None else self.tomb_gap // 2
             self.bury("lie", a, nb / len(q), gap, self.kin_n.get(a, 0))
+
+    def _traj_refutes(self, ev):
+        """v4.0, шлюз --traj-gate: опровергнуть, только если мой датчик
+        расходится с заявкой больше POS_TOL, а кинематический прогноз по
+        заявкам других авторов (kinematics.predict) согласен с моим датчиком
+        (невязка <= TRAJ_THR) и не согласен с заявкой (> TRAJ_THR). Если и мой
+        датчик далёк от прогноза (свой грубый сбой) или прогноза нет -
+        решения нет, работает v3.1."""
+        my = self.sensor.reading(ev.key, ev.value, ev.hlc[0])
+        try:
+            if max(abs(ev.value[0] - my[0]), abs(ev.value[1] - my[1])) <= Sensor.POS_TOL:
+                return False
+        except (TypeError, IndexError):
+            return False
+        lst = self.claims.get(ev.key, ())
+        ver = (len(lst), len(self.slashed), len(self.tombs.suspect))
+        hit = self.traj_cache.get(ev.eid)
+        if hit is not None and hit[0] == ver:
+            return hit[1]
+        t, a = ev.hlc[0], ev.author
+        cl = [(l, b, val) for (l, c, b, eid, val) in lst[bisect_left(lst, (t - kin.HORIZON_MS,)):]
+              if l < t and b != a and b not in self.slashed and not self.tombs.is_suspect(b)
+              and isinstance(val, list)]
+        pred = kin.predict(cl, t)
+        res = False
+        if pred is not None:
+            self.traj_checks += 1
+            res = (kin.residual(ev.value, pred) > TRAJ_THR
+                   and kin.residual(my, pred) <= TRAJ_THR)
+        self.traj_cache[ev.eid] = (ver, res)
+        return res
 
     def kinematic_check(self, ev, now_ms):
         """T4: скачок координаты цели против прежнего победителя слота."""
@@ -1963,6 +2005,7 @@ def run_node(cfg, idx, barrier, counts, q):
         "thymus_blocked": node.tombs.blocked if node.anis else 0,
         "fast_sent": node.fast_sent,
         "mz_suppressed": node.mz_suppressed,
+        "traj_checks": node.traj_checks, "traj_veto": node.traj_veto,
         "false_ref": node.false_ref,
         "tombs": [[e.author, e.env["body"]["target"], e.env["body"].get("src"), e.env["body"].get("s"), e.arrival]
                   for e in node.tomb_events if e.author == idx],

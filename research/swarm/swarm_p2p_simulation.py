@@ -58,7 +58,7 @@ DEFAULTS = dict(n=5, seed=1, branch="B", loss=0.05, topology="full",
                 apsa_rule=None, tomb_gap=20, liar_vote=False, liar_win=50, liar_gap=2, apsa_window="event",   # v2.1
                 fast_refute=0,                                 # v2.2
                 sensor_model="flip", marzullo=0, status_prior=False,
-                slot_votes=False, world="steps")   # v3
+                slot_votes=False, world="steps", traj_gate=False)   # v3
 
 PARTITIONS = {"none": "none",
               "isolate": "isolate:2@180+120",
@@ -245,7 +245,11 @@ def run_once(cfg):
                 liar_gap=cfg["liar_gap"], apsa_window=cfg["apsa_window"],
                 fast_refute=cfg["fast_refute"],
                 sensor_model=cfg["sensor_model"], marzullo=cfg["marzullo"],
-                status_prior=cfg["status_prior"], slot_votes=cfg["slot_votes"])
+                status_prior=cfg["status_prior"], slot_votes=cfg["slot_votes"],
+                # шлюзу нужно общее время: при дрейфе +-2 с (мир steps) он
+                # опроверг 143 980 честных заявок на сетке 490 - только kinematic
+                traj_gate=cfg["traj_gate"] and cfg["world"] == "kinematic",
+                drift_max_ms=20 if cfg["world"] == "kinematic" else 2000)
     ctx = mp.get_context("spawn")
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["PYTHONHASHSEED"] = "0"
@@ -330,7 +334,7 @@ def run_once(cfg):
         rec["apsa_window"] = cfg["apsa_window"]
     if cfg["fast_refute"]:
         rec["fast_refute"] = cfg["fast_refute"]
-    for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world"):
+    for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world", "traj_gate"):
         if cfg[k] != DEFAULTS[k]:
             rec[k] = cfg[k]
     if cfg["arbiter"] != "scalar":
@@ -568,6 +572,8 @@ def compute_metrics(cfg, world, results):
     m["false_ref_pos"] = sum(results[i].get("false_ref", {}).get("pos", 0) for i in honest)
     m["false_ref_status"] = sum(results[i].get("false_ref", {}).get("status", 0) for i in honest)
     m["mz_suppressed"] = sum(results[i].get("mz_suppressed", 0) for i in honest)
+    m["traj_checks"] = sum(results[i].get("traj_checks", 0) for i in honest)
+    m["traj_veto"] = sum(results[i].get("traj_veto", 0) for i in honest)
     # v3: задержка приёма честной смены истины (первое сообщение о новом
     # значении, тег ("C", pid, "new")) у остальных честных узлов, мс
     tagged = {eid: (key, author) for eid, (key, vh, l, c, author, gen, label, tag)
@@ -888,7 +894,7 @@ def run_grid(cfgs, out, workers, extra):
                 rec["apsa_window"] = dict(DEFAULTS, **c)["apsa_window"]
             if dict(DEFAULTS, **c)["fast_refute"]:
                 rec["fast_refute"] = dict(DEFAULTS, **c)["fast_refute"]
-            for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world"):
+            for k in ("sensor_model", "marzullo", "status_prior", "slot_votes", "world", "traj_gate"):
                 if dict(DEFAULTS, **c)[k] != DEFAULTS[k]:
                     rec[k] = dict(DEFAULTS, **c)[k]
             if dict(DEFAULTS, **c)["arbiter"] != "scalar":
@@ -1332,6 +1338,9 @@ def main():
                     help="v3.1: выключить досылку голосов (воспроизведение v3.0)")
     ap.add_argument("--world", default="steps", choices=("steps", "kinematic"),
                     help="v4.0: цели прыгают раз в ~4 с (steps, как до v4) или движутся плавно (kinematic)")
+    ap.add_argument("--traj-gate", action="store_true",
+                    help="v4.0: кинематический шлюз - прогноз по заявкам других авторов решает "
+                         "спор моего датчика с заявкой о цели (0 байт на проводе)")
     ap.add_argument("--fast-refute", type=int, default=0,
                     help="v2.2: быстрая полоса - до N опровержений за 500 мс сразу отдельным пакетом (0 = выкл)")
     ap.add_argument("--rebut", action="store_true",
@@ -1383,6 +1392,7 @@ def main():
         a.arbiter, a.sensor_model, a.marzullo, a.slot_votes)
     extra["status_prior"] = a.status_prior
     extra["world"] = a.world
+    extra["traj_gate"] = a.traj_gate
     if a.grid:
         run_grid(grid(a.grid), a.out, a.workers, extra)
         return
