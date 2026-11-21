@@ -1,0 +1,50 @@
+{
+ "stages": [
+  {
+   "stage": "pilot",
+   "calls": 500,
+   "usd": 0.0689,
+   "in_tok": 348403,
+   "out_tok": 68191,
+   "fails": 4,
+   "time": "2026-11-21 14:37"
+  },
+  {
+   "stage": "batch msgbatch_011yJ92JKcrfU9GvRwewDBKM",
+   "calls": 20000,
+   "usd": 1.3734,
+   "in_tok": 14093315,
+   "out_tok": 2675050,
+   "fails": 87,
+   "time": "2026-11-21 15:01"
+  },
+  {
+   "stage": "batch msgbatch_01Uh9HCB8r6xEdcv7WFGm8Ws",
+   "calls": 20000,
+   "usd": 1.373,
+   "in_tok": 14118469,
+   "out_tok": 2668338,
+   "fails": 73,
+   "time": "2026-11-21 15:01"
+  },
+  {
+   "stage": "batch msgbatch_01DAjqzjNcacbQruk3WZHotW",
+   "calls": 20000,
+   "usd": 1.3726,
+   "in_tok": 14077740,
+   "out_tok": 2675000,
+   "fails": 67,
+   "time": "2026-11-21 15:01"
+  },
+  {
+   "stage": "batch msgbatch_01Mmf1PDj6UFyrY3DX3Z8xE6",
+   "calls": 7427,
+   "usd": 0.5076,
+   "in_tok": 5219154,
+   "out_tok": 986389,
+   "fails": 37,
+   "time": "2026-11-21 15:01"
+  }
+ ],
+ "spent_usd": 4.6955
+}

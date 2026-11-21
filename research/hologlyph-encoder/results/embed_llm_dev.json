@@ -1,0 +1,14 @@
+{
+ "bge": {
+  "nodes": 74261,
+  "llm_missing": 0,
+  "llm_fail_frac": 0.0039455434211766605,
+  "B2_truncated_frac": 0.2729147772154121
+ },
+ "minilm": {
+  "nodes": 74261,
+  "llm_missing": 0,
+  "llm_fail_frac": 0.0039455434211766605,
+  "B2_truncated_frac": 0.8447968169450865
+ }
+}

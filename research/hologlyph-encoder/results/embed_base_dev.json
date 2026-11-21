@@ -1,0 +1,20 @@
+{
+ "bge": {
+  "max_seq_length": 512,
+  "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+  "F0_unique": 67927,
+  "F0_truncated_frac": 0.16498594078937684,
+  "F3_parts_cut_frac": 0.4564633964514686,
+  "F3_truncated_frac": 5.87759900080817e-05,
+  "seconds": 669.8
+ },
+ "minilm": {
+  "max_seq_length": 256,
+  "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+  "F0_unique": 67927,
+  "F0_truncated_frac": 0.3436924934120453,
+  "F3_parts_cut_frac": 0.4564633964514686,
+  "F3_truncated_frac": 0.3445154654323709,
+  "seconds": 305.0
+ }
+}

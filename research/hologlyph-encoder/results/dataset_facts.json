@@ -1,0 +1,43 @@
+{
+ "questions": 500,
+ "turns_total": 246750,
+ "unique_turn_texts_all": 189477,
+ "dev": {
+  "questions": 150,
+  "abs": 15,
+  "types": {
+   "single-session-user": 21,
+   "multi-session": 40,
+   "single-session-preference": 9,
+   "temporal-reasoning": 40,
+   "knowledge-update": 23,
+   "single-session-assistant": 17
+  },
+  "turns": 74261,
+  "unique_texts": 67927,
+  "relevant_turns": 258,
+  "non_abs_without_rel_turn": 0
+ },
+ "test": {
+  "questions": 350,
+  "abs": 15,
+  "types": {
+   "single-session-user": 49,
+   "multi-session": 93,
+   "single-session-preference": 21,
+   "temporal-reasoning": 93,
+   "knowledge-update": 55,
+   "single-session-assistant": 39
+  },
+  "turns": 172489,
+  "unique_texts": 142499,
+  "relevant_turns": 638,
+  "non_abs_without_rel_turn": 0
+ },
+ "test_unique_not_in_dev": 121550,
+ "dev_test_text_overlap": 20949,
+ "roles": {
+  "user": 122416,
+  "assistant": 124334
+ }
+}

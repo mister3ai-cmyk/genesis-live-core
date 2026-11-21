@@ -1,0 +1,130 @@
+{
+ "tests": {
+  "bge_d128": {
+   "best_baseline": "B4",
+   "G1": 87.4074074074074,
+   "best": 87.4074074074074,
+   "diff_pp": 0.0,
+   "ci95_pp": [
+    -5.185185185185185,
+    5.185185185185185
+   ],
+   "mcnemar_best_only_vs_g1_only": [
+    6,
+    6
+   ],
+   "mcnemar_p": 1.0,
+   "n_questions": 135
+  },
+  "bge_d384": {
+   "best_baseline": "B5",
+   "G1": 90.37037037037037,
+   "best": 88.88888888888889,
+   "diff_pp": 1.4814814814814816,
+   "ci95_pp": [
+    -2.240740740740724,
+    5.9259259259259265
+   ],
+   "mcnemar_best_only_vs_g1_only": [
+    3,
+    5
+   ],
+   "mcnemar_p": 0.7265625,
+   "n_questions": 135
+  },
+  "minilm_d128": {
+   "best_baseline": "B4",
+   "G1": 87.4074074074074,
+   "best": 86.66666666666667,
+   "diff_pp": 0.7407407407407408,
+   "ci95_pp": [
+    0.0,
+    2.2222222222222223
+   ],
+   "mcnemar_best_only_vs_g1_only": [
+    0,
+    1
+   ],
+   "mcnemar_p": 1.0,
+   "n_questions": 135
+  },
+  "minilm_d384": {
+   "best_baseline": "B4",
+   "G1": 88.88888888888889,
+   "best": 87.4074074074074,
+   "diff_pp": 1.4814814814814816,
+   "ci95_pp": [
+    0.0,
+    3.7037037037037033
+   ],
+   "mcnemar_best_only_vs_g1_only": [
+    0,
+    2
+   ],
+   "mcnemar_p": 0.5,
+   "n_questions": 135
+  }
+ },
+ "extra": {
+  "bge_d128": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 9.642861868996988e-07,
+   "g1_top10_antidirection_frac": 0.012592592592592594,
+   "g1_latency_ms_per_question_p50": 9.39979999930074
+  },
+  "bge_d384": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 1.386641542922007e-06,
+   "g1_top10_antidirection_frac": 0.011851851851851851,
+   "g1_latency_ms_per_question_p50": 24.18779999970866
+  },
+  "bge_d128_nocenter": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 1.048275862558512e-06,
+   "g1_top10_antidirection_frac": 0.0,
+   "g1_latency_ms_per_question_p50": 9.41190000048664
+  },
+  "bge_d384_nocenter": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 1.3594260508398293e-06,
+   "g1_top10_antidirection_frac": 0.0,
+   "g1_latency_ms_per_question_p50": 24.37420000023849
+  },
+  "bge_d128_gauss": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 8.559875368518988e-07,
+   "g1_top10_antidirection_frac": 0.10592592592592594,
+   "g1_latency_ms_per_question_p50": 9.713999999803491
+  },
+  "minilm_d128": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 9.876979447653866e-07,
+   "g1_top10_antidirection_frac": 0.02370370370370371,
+   "g1_latency_ms_per_question_p50": 9.548600000925944
+  },
+  "minilm_d384": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 1.3129173339621047e-06,
+   "g1_top10_antidirection_frac": 0.014074074074074076,
+   "g1_latency_ms_per_question_p50": 23.959500000273692
+  },
+  "minilm_d128_nocenter": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 9.108039193961304e-07,
+   "g1_top10_antidirection_frac": 0.006666666666666667,
+   "g1_latency_ms_per_question_p50": 9.618200001568766
+  },
+  "minilm_d384_nocenter": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 1.3554298448070767e-06,
+   "g1_top10_antidirection_frac": 0.0014814814814814816,
+   "g1_latency_ms_per_question_p50": 24.128800001562922
+  },
+  "minilm_d128_gauss": {
+   "degenerate_nodes": 554,
+   "ortho_err_max": 8.969053624241496e-07,
+   "g1_top10_antidirection_frac": 0.09703703703703702,
+   "g1_latency_ms_per_question_p50": 9.530900000754627
+  }
+ }
+}
