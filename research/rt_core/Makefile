@@ -96,7 +96,35 @@ check-m4 check-m7:
 
 baremetal: check-m4 check-m7
 
+# Цена вызовов в инструкциях на голом M4/M7: qemu -icount (время = число
+# инструкций), SysTick с калибровкой. Не такты кремния.
+bench-m4 bench-m7:
+	@d=build/bench-$(@:bench-%=%); rm -rf $$d; mkdir -p $$d; \
+	fl="$(if $(filter bench-m4,$@),$(M4),$(M7))"; \
+	for f in $(SRCS); do $(ARM_CC) $(EMB) $$fl -c -o $$d/$${f%.c}.o $$f || exit 1; done; \
+	rm -f *.su; \
+	$(ARM_CC) -O2 $(WARN) $$fl -I. -c -o $$d/bench_m.o baremetal/bench_m.c || exit 1; \
+	$(ARM_CC) -O2 -std=gnu99 -Wall -Wextra -Werror $$fl -c -o $$d/startup.o baremetal/startup.c || exit 1; \
+	$(ARM_CC) $$fl $(BM_LD) -o $$d/bench_m.elf $$d/startup.o $$d/bench_m.o $$d/rt_*.o -lm || exit 1; \
+	m="$(if $(filter bench-m4,$@),mps2-an386 -cpu cortex-m4,mps2-an500 -cpu cortex-m7)"; \
+	out=$$(timeout 900 $(QEMU_SYS) -M $$m -icount shift=7 -nographic -monitor none -serial none \
+		-semihosting-config enable=on,target=native -kernel $$d/bench_m.elf 2>&1); \
+	rc=$$?; echo "$$out"; \
+	case "$$out" in *"bench-m: ok"*) ;; *) rc=1 ;; esac; \
+	if [ $$rc -ne 0 ]; then echo "FAIL $@: код $$rc"; exit 1; fi
+
+bench-m: bench-m4 bench-m7
+
+# Статика по графу вызовов GCC: нет рекурсии, нет стека переменного
+# размера; худшая цепочка стека каждой экспортируемой функции (M4).
+check-bounds:
+	@rm -rf build/ci-m4; mkdir -p build/ci-m4
+	@for f in $(SRCS); do $(ARM_CC) $(EMB) $(M4) -fcallgraph-info=su -c \
+		-o build/ci-m4/$${f%.c}.o $$f || exit 1; done
+	@rm -f *.su
+	python3 tools/stack_bound.py build/ci-m4/*.ci
+
 clean:
 	rm -rf $(OBJS) librt_core.so tests/test_rt bench/bench_rt build *.su
 
-.PHONY: all check check-nomalloc bench clean cross-aarch64 cross-m4 cross-m7 embedded check-m4 check-m7 baremetal
+.PHONY: all check check-nomalloc bench clean cross-aarch64 cross-m4 cross-m7 embedded check-m4 check-m7 baremetal bench-m4 bench-m7 bench-m check-bounds

@@ -50,6 +50,10 @@ jobs:
         working-directory: research/rt_core
         run: make baremetal
 
+      - name: rt_core bounded stack (call graph) and instruction counts (qemu -icount)
+        working-directory: research/rt_core
+        run: make check-bounds bench-m
+
   python-tests:
     runs-on: ubuntu-latest
     steps:
