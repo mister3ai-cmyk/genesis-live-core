@@ -1,0 +1,5 @@
+# gitleaks false positives: CRDT glyph field name "key": "drone_0.battery" (swarm simulator), not a secret
+7e7e752831b5689905f12d05620edbee84bbd59c:research/swarm/swarm_p2p_simulation.py:generic-api-key:863
+7e7e752831b5689905f12d05620edbee84bbd59c:research/swarm/tests/test_swarm.py:generic-api-key:483
+7e7e752831b5689905f12d05620edbee84bbd59c:research/swarm/tests/test_swarm.py:generic-api-key:518
+7e7e752831b5689905f12d05620edbee84bbd59c:research/swarm/tests/test_swarm.py:generic-api-key:526
